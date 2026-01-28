@@ -1,0 +1,14 @@
+fileFormatVersion: 2
+guid: 3ba9231923d5df047be1afe40ef015cd
+ScriptedImporter:
+  internalIDToNameTable: []
+  externalObjects: {}
+  serializedVersion: 2
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+  script: {fileID: 11500000, guid: aa4e04fd5b68f59459d84de154a541a8, type: 3}
+  importRotations: 1
+  importScales: 1
+  importSH: 1
+  rotationOrder: 1
