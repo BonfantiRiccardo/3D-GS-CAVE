@@ -3,8 +3,11 @@ using UnityEngine;
 
 namespace GaussianSplatting.Editor
 {
+    /// <summary>
+    /// PLYImporter is responsible for importing PLY files as GSAsset ScriptableObjects.
+    /// </summary>
     [ScriptedImporter(1, "ply")]
-    public class PLYImporter : ScriptedImporter     //Imports PLY files as GSAsset
+    public class PLYImporter : ScriptedImporter
     {
         [Header("Parsing Options")]         // Specify import options in the inspector
         [SerializeField] private bool importRotations = true;
@@ -12,8 +15,10 @@ namespace GaussianSplatting.Editor
         [SerializeField] private bool importSH = false;
         [SerializeField] private RotationOrder rotationOrder = RotationOrder.WXYZ;
 
-        // This method is called when the asset is imported and is responsible for creating the GSAsset
-        // It uses the PLYParser to read the PLY file and GSAssetBuilder to create the asset
+        /// <summary>
+        /// Called when the asset is imported. Creates a GSAsset from the PLY file, using PLYParser and GSAssetBuilder.
+        /// </summary>
+        /// <param name="ctx">The context for the asset import.</param>
         public override void OnImportAsset(AssetImportContext ctx)
         {
             var options = new PLYImportOptions

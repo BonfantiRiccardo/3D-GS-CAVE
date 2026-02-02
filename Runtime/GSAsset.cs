@@ -3,7 +3,9 @@ using UnityEngine;
 
 namespace GaussianSplatting
 {
-    // This ScriptableObject holds the data for a Gaussian Splatting asset
+    /// <summary>
+    /// GSAsset ScriptableObject for storing Gaussian Splatting data.
+    /// </summary>
     [CreateAssetMenu(fileName = "GSAsset", menuName = "Scriptable Objects/GSAsset")]
     public class GSAsset : ScriptableObject
     {
@@ -11,7 +13,7 @@ namespace GaussianSplatting
         [SerializeField, HideInInspector] private Vector3[] positions;      // Splat center positions
         [SerializeField, HideInInspector] private quaternion[] rotations;   // Splat orientations
         [SerializeField, HideInInspector] private Vector3[] scales;         // Splat scale factors
-        [SerializeField, HideInInspector] private Vector3[] sh;             // direct color (rgb for sh0)
+        [SerializeField, HideInInspector] private Vector4[] sh;             // SH DC coefficients (xyz) + opacity (w) - stored as Vector4 to prevent clamping
         [SerializeField, HideInInspector] private float[] shRest;           //other SH coefficients (1,2,3) if used
         [SerializeField, HideInInspector] private int shRestCount;          //number of SH rest bands per splat (0,1,2,3)
         public int splatCount;                                   // Total number of splats in the asset
@@ -22,18 +24,18 @@ namespace GaussianSplatting
         public quaternion[] Rotations => rotations;
         public Vector3[] Scales => scales;
 
-        public Vector3[] SH => sh;
+        public Vector4[] SH => sh;
         public float[] SHRest => shRest;
         public int SHRestCount => shRestCount;
 
-        /**
-        * Initializes the GSAsset with the provided data arrays and parameters.
-        */
+        /// <summary>
+        /// Initializes the GSAsset with the provided data arrays and parameters.
+        /// </summary>
         public void Initialize(
             Vector3[] positions,
             quaternion[] rotations,
             Vector3[] scales,
-            Vector3[] sh,
+            Vector4[] sh,
             float[] shRest,
             int shRestCount,
             Bounds bounds)
@@ -41,7 +43,7 @@ namespace GaussianSplatting
             this.positions = positions ?? System.Array.Empty<Vector3>();
             this.rotations = rotations ?? System.Array.Empty<quaternion>();
             this.scales = scales ?? System.Array.Empty<Vector3>();
-            this.sh = sh ?? System.Array.Empty<Vector3>();
+            this.sh = sh ?? System.Array.Empty<Vector4>();
             this.shRest = shRest ?? System.Array.Empty<float>();
             this.shRestCount = shRestCount;
             this.splatCount = this.positions.Length;

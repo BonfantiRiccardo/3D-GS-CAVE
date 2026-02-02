@@ -3,11 +3,17 @@ using UnityEngine;
 
 namespace GaussianSplatting.Editor
 {
+    /// <summary>
+    /// Custom inspector for GSAsset ScriptableObjects.
+    /// </summary>
     [CustomEditor(typeof(GSAsset))]
     public class GSAssetInspector : UnityEditor.Editor
     {
-        private Vector2 scroll;
+        private Vector2 scroll; // Scroll position for bounds display
 
+        /// <summary>
+        /// Overrides the default inspector GUI to display GSAsset information.
+        /// </summary>
         public override void OnInspectorGUI()
         {
             GSAsset asset = (GSAsset)target;

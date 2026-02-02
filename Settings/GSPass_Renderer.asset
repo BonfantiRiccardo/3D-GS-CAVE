@@ -73,5 +73,7 @@ MonoBehaviour:
   settings:
     enabled: 1
     renderPassEvent: 500
-    splatMaterial: {fileID: 0}
+    splatMaterial: {fileID: 2100000, guid: 6dd8e28c8c9fb594f84c2c3b3782b92f, type: 2}
     splatSize: 1
+    enableSorting: 1
+    sortingShader: {fileID: 7200000, guid: cf0d2e07c0f4e5748aefed56388f94ac, type: 3}

@@ -7,17 +7,24 @@ using UnityEngine;
 
 namespace GaussianSplatting.Editor
 {
-    // This class is responsible for parsing PLY files and extracting gaussian data
+    /// <summary>
+    /// PLYParser is responsible for parsing PLY files and extracting gaussian data
+    /// </summary>
     public static class PLYParser
     {
-        // Only binary little-endian PLY is supported
+        /// <summary>
+        /// Specifies the format of the PLY file (ASCII, Binary Little Endian, Binary Big Endian)
+        /// </summary>
         private enum PLYFormat
         {
-            BinaryLittleEndian,
+            ASCII,
+            BinaryLittleEndian,             //As for now only binary little-endian PLY is supported
             BinaryBigEndian
         }
 
-        // Supported PLY property types
+        /// <summary>
+        /// Specifies the data type of a PLY property
+        /// </summary>
         private enum PLYType
         {
             Int8,
@@ -30,14 +37,18 @@ namespace GaussianSplatting.Editor
             Float64
         }
 
-        // Represents a property in the PLY file
+        /// <summary>
+        /// Represents a property in the PLY file
+        /// </summary>
         private struct PLYProperty
         {
             public string Name;
             public PLYType Type;
         }
 
-        // Represents the PLY file header, where we store metadata about the file structure
+        /// <summary>
+        /// Represents the PLY file header, where we store metadata about the file structure
+        /// </summary>
         private struct PLYHeader
         {
             public int VertexCount;
@@ -48,7 +59,13 @@ namespace GaussianSplatting.Editor
             public int RestCount;            //Number of f_rest_* coefficients
         }
 
-        // Main method to parse a PLY file and return the imported data
+
+        /// <summary>
+        /// Parses a PLY file at the given path with the specified import options.
+        /// </summary>
+        /// <param name="path">The file path of the PLY file to parse.</param>
+        /// <param name="options">The import options to use during parsing.</param>
+        /// <returns>A GSImportData object containing the parsed data.</returns>
         public static GSImportData Parse(string path, PLYImportOptions options)
         {       // Open the file stream for reading
             using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
@@ -57,7 +74,11 @@ namespace GaussianSplatting.Editor
             return ParseBinary(stream, header, options);
         }
 
-        // Reads the PLY header and extracts metadata
+        /// <summary>
+        /// Reads the PLY header (ASCII) and extracts metadata
+        /// </summary>
+        /// <param name="stream">The stream to read the header from.</param>
+        /// <returns>A PLYHeader struct containing the parsed header information.</returns>
         private static PLYHeader ReadHeader(Stream stream)
         {
             int vertexCount = 0;
@@ -69,16 +90,16 @@ namespace GaussianSplatting.Editor
             var lineBuffer = new List<byte>(256);
             var headerLines = new List<string>();
 
-            while (true)
+            while (true)                        // Until we reach "end_header"
             {
-                int b = stream.ReadByte();
+                int b = stream.ReadByte();      //Read byte by byte
                 if (b < 0)
                 {
                     throw new InvalidDataException("PLY header not found.");
                 }
 
                 headerBytes++;
-                if (b == '\n')
+                if (b == '\n')                    // When we reach a newline, process the line and store it
                 {
                     string line = System.Text.Encoding.ASCII.GetString(lineBuffer.ToArray()).TrimEnd('\r');
                     lineBuffer.Clear();
@@ -133,7 +154,7 @@ namespace GaussianSplatting.Editor
                 }
                 else
                 {
-                    lineBuffer.Add((byte)b);
+                    lineBuffer.Add((byte)b);      // Accumulate bytes for the current line
                 }
             }
 
@@ -151,6 +172,13 @@ namespace GaussianSplatting.Editor
             };
         }
 
+        /// <summary>
+        /// Parses binary PLY data from the stream based on the provided header and import options.
+        /// </summary>
+        /// <param name="stream">The stream containing the binary PLY data.</param>
+        /// <param name="header">The PLYHeader containing metadata about the file structure.</param>
+        /// <param name="options">The import options to use during parsing.</param>
+        /// <returns>A GSImportData object containing the parsed data.</returns>
         private static GSImportData ParseBinary(Stream stream, PLYHeader header, PLYImportOptions options)
         {   //If the format is binary, we read the data using a BinaryReader
             bool littleEndian = header.Format == PLYFormat.BinaryLittleEndian;
@@ -163,44 +191,37 @@ namespace GaussianSplatting.Editor
 
             using var reader = new BinaryReader(stream, System.Text.Encoding.ASCII, leaveOpen: false);
 
-            var positions = new Vector3[header.VertexCount];
+            var positions = new Vector3[header.VertexCount];        //Initialize arrays to hold the data
             var rotations = new quaternion[header.VertexCount];
             var scales = new Vector3[header.VertexCount];
-            var sh = new Vector3[header.VertexCount];
+            var sh = new Vector4[header.VertexCount];  // Use Vector4 to preserve raw SH coefficients without clamping
             float[] shRest = header.RestCount > 0 && options.ImportSH
                 ? new float[header.VertexCount * header.RestCount]
                 : Array.Empty<float>();
 
-            Vector3 min = new(float.MaxValue, float.MaxValue, float.MaxValue);
+            Vector3 min = new(float.MaxValue, float.MaxValue, float.MaxValue);      //Keep track of bounds
             Vector3 max = new(float.MinValue, float.MinValue, float.MinValue);
 
             for (int i = 0; i < header.VertexCount; i++)    // Read each vertex
             {
-                float x = 0f, y = 0f, z = 0f;
-                float r = 1f, g = 1f, b = 1f;
+                float x = 0f, y = 0f, z = 0f;               //Initialize default values for all properties
+                float opacity = 1f;
                 float rot0 = float.NaN, rot1 = float.NaN, rot2 = float.NaN, rot3 = float.NaN;
                 float qx = 0f, qy = 0f, qz = 0f, qw = 1f;
                 float s0 = float.NaN, s1 = float.NaN, s2 = float.NaN;
                 float sh0 = 0f, sh1 = 0f, sh2 = 0f;
 
-                for (int p = 0; p < header.Properties.Count; p++)
+                for (int p = 0; p < header.Properties.Count; p++)           // Read each property for the vertex
                 {
                     PLYProperty prop = header.Properties[p];
                     float value = ReadAsFloat(reader, prop.Type, littleEndian);
 
-                    switch (prop.Name.ToLowerInvariant())
+                    switch (prop.Name.ToLowerInvariant())           // Map property names to data fields
                     {
                         case "x": x = value; break;
                         case "y": y = value; break;
                         case "z": z = value; break;
-                        case "red": r = value; break;
-                        case "green": g = value; break;
-                        case "blue": b = value; break;
-                        case "r": r = value; break;
-                        case "g": g = value; break;
-                        case "b": b = value; break;
-                        case "alpha": break;
-                        case "opacity": break;
+                        case "alpha" or "opacity": opacity = value; break;
                         case "rot_0": rot0 = value; break;
                         case "rot_1": rot1 = value; break;
                         case "rot_2": rot2 = value; break;
@@ -209,18 +230,15 @@ namespace GaussianSplatting.Editor
                         case "qy": qy = value; break;
                         case "qz": qz = value; break;
                         case "qw": qw = value; break;
-                        case "scale_0": s0 = value; break;
-                        case "scale_1": s1 = value; break;
-                        case "scale_2": s2 = value; break;
-                        case "scale_x": s0 = value; break;
-                        case "scale_y": s1 = value; break;
-                        case "scale_z": s2 = value; break;
-                        case "f_dc_0": sh0 = value; break;
-                        case "f_dc_1": sh1 = value; break;
-                        case "f_dc_2": sh2 = value; break;
+                        case "scale_0" or "scale_x": s0 = value; break;
+                        case "scale_1" or "scale_y": s1 = value; break;
+                        case "scale_2" or "scale_z": s2 = value; break;
+                        case "f_dc_0" or "r" or "red": sh0 = value; break;
+                        case "f_dc_1" or "g" or "green": sh1 = value; break;
+                        case "f_dc_2" or "b" or "blue": sh2 = value; break;
                     }
 
-                    if (options.ImportSH && header.RestCount > 0)
+                    if (options.ImportSH && header.RestCount > 0)       //If importing SH rest coefficients, store them
                     {
                         int restIndex = header.RestIndexMap[p];
                         if (restIndex >= 0)
@@ -230,22 +248,26 @@ namespace GaussianSplatting.Editor
                     }
                 }
 
-                positions[i] = new Vector3(x, y, z);
+                positions[i] = new Vector3(x, y, z);        //Assign read values to arrays
                 min = Vector3.Min(min, positions[i]);
                 max = Vector3.Max(max, positions[i]);
 
                 if (options.ImportRotations)
                 {
+                    quaternion q;
                     if (!float.IsNaN(rot0))
                     {
-                        rotations[i] = options.RotationOrder == RotationOrder.WXYZ
+                        // Standard 3DGS PLY files use rot_0/1/2/3 format
+                        q = options.RotationOrder == RotationOrder.WXYZ
                             ? new quaternion(rot1, rot2, rot3, rot0)
                             : new quaternion(rot0, rot1, rot2, rot3);
                     }
                     else
                     {
-                        rotations[i] = new quaternion(qx, qy, qz, qw);
+                        q = new quaternion(qx, qy, qz, qw);
                     }
+                    // Normalize quaternion to ensure valid rotation
+                    rotations[i] = math.normalize(q);
                 }
                 else
                 {
@@ -260,7 +282,13 @@ namespace GaussianSplatting.Editor
                     }
                     else
                     {
-                        scales[i] = new Vector3(s0, s1, s2);
+                        // Standard 3DGS PLY files store scales as log-scale values
+                        // Apply exponential to convert to actual scale
+                        scales[i] = new Vector3(
+                            Mathf.Exp(s0),
+                            Mathf.Exp(s1),
+                            Mathf.Exp(s2)
+                        );
                     }
                 }
                 else
@@ -268,7 +296,12 @@ namespace GaussianSplatting.Editor
                     scales[i] = Vector3.one;
                 }
 
-                sh[i] = new Vector3(sh0, sh1, sh2);
+                // Standard 3DGS PLY files store opacity as logit (inverse sigmoid)
+                // Apply sigmoid to convert to [0, 1] range: 1 / (1 + exp(-x))
+                float alpha = 1.0f / (1.0f + Mathf.Exp(-opacity));
+                
+                // Store as Vector4 to preserve raw SH coefficients (can be negative or > 1)
+                sh[i] = new Vector4(sh0, sh1, sh2, alpha);
             }
 
             return new GSImportData
@@ -283,6 +316,11 @@ namespace GaussianSplatting.Editor
             };
         }
 
+        /// <summary>
+        /// Parses a PLY property type string into a PLYType enum.
+        /// </summary>
+        /// <param name="type">The property type string.</param>
+        /// <returns>The corresponding PLYType enum value.</returns>
         private static PLYType ParseType(string type)
         {
             return type.ToLowerInvariant() switch
@@ -299,6 +337,13 @@ namespace GaussianSplatting.Editor
             };
         }
 
+        /// <summary>
+        /// Reads a value from the BinaryReader as a float based on the specified PLYType
+        /// </summary>
+        /// <param name="reader">The BinaryReader to read from.</param>
+        /// <param name="type">The PLYType of the value to read.</param>
+        /// <param name="littleEndian">Whether the data is in little-endian format.</param>
+        /// <returns>The read value as a float.</returns>
         private static float ReadAsFloat(BinaryReader reader, PLYType type, bool littleEndian)
         {
             return type switch
@@ -315,6 +360,14 @@ namespace GaussianSplatting.Editor
             };
         }
 
+        /// <summary>
+        /// Reads an integer value from the BinaryReader based on the specified size, endianness, and signedness.
+        /// </summary>
+        /// <param name="reader">The BinaryReader to read from.</param>
+        /// <param name="size">The size of the integer in bytes.</param>
+        /// <param name="littleEndian">Whether the data is in little-endian format.</param>
+        /// <param name="signed">Whether the integer is signed.</param>
+        /// <returns>The read integer value as a long.</returns>
         private static long ReadInteger(BinaryReader reader, int size, bool littleEndian, bool signed)
         {
             byte[] bytes = reader.ReadBytes(size);
@@ -332,6 +385,12 @@ namespace GaussianSplatting.Editor
             };
         }
 
+        /// <summary>
+        /// Reads a float value from the BinaryReader with the specified endianness.
+        /// </summary>
+        /// <param name="reader">The BinaryReader to read from.</param>
+        /// <param name="littleEndian">Whether the data is in little-endian format.</param>
+        /// <returns>The read float value.</returns>
         private static float ReadFloat(BinaryReader reader, bool littleEndian)
         {
             byte[] bytes = reader.ReadBytes(4);
@@ -342,6 +401,12 @@ namespace GaussianSplatting.Editor
             return BitConverter.ToSingle(bytes, 0);
         }
 
+        /// <summary>
+        /// Reads a double value from the BinaryReader with the specified endianness.
+        /// </summary>
+        /// <param name="reader">The BinaryReader to read from.</param>
+        /// <param name="littleEndian">Whether the data is in little-endian format.</param>
+        /// <returns>The read double value.</returns>
         private static double ReadDouble(BinaryReader reader, bool littleEndian)
         {
             byte[] bytes = reader.ReadBytes(8);
@@ -352,6 +417,12 @@ namespace GaussianSplatting.Editor
             return BitConverter.ToDouble(bytes, 0);
         }
 
+        /// <summary>
+        /// Builds a mapping from property indices to SH rest coefficient indices.
+        /// </summary>
+        /// <param name="properties">The list of PLY properties.</param>
+        /// <param name="restCount">The output count of SH rest coefficients.</param>
+        /// <returns>An array mapping property indices to SH rest coefficient indices.</returns>
         private static int[] BuildRestIndexMap(List<PLYProperty> properties, out int restCount)
         {
             int[] map = new int[properties.Count];
@@ -384,6 +455,14 @@ namespace GaussianSplatting.Editor
             return map;
         }
 
+        /// <summary>
+        /// Logs the parsed PLY header information for debugging purposes.
+        /// </summary>
+        /// <param name="format">The PLY file format.</param>
+        /// <param name="vertexCount">The number of vertices.</param>
+        /// <param name="properties">The list of PLY properties.</param>
+        /// <param name="restCount">The number of SH rest coefficients.</param>
+        /// <param name="headerLines">The raw header lines.</param>
         private static void LogHeader(PLYFormat format, int vertexCount, List<PLYProperty> properties, int restCount, List<string> headerLines)
         {
             string propertyList = properties.Count > 0

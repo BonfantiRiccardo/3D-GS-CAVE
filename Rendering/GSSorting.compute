@@ -1,0 +1,190 @@
+// GSSorting.compute
+// Compute shader for depth-based Gaussian Splatting sorting
+// This shader handles:
+// 1. Computing view-space depth for each splat
+// 2. Culling splats outside the view frustum
+// 3. Preparing depth-based sort keys for back-to-front rendering
+//
+// The actual radix sort kernels are provided by ThirdParty/DeviceRadixSort.hlsl
+// We only define the preprocessing kernels here.
+
+#pragma kernel InitSortBuffers
+#pragma kernel CalcViewData
+#pragma kernel CalcSortKeys
+#pragma kernel InitDeviceRadixSort
+#pragma kernel Upsweep
+#pragma kernel Scan
+#pragma kernel Downsweep
+
+#define GROUP_SIZE 256
+
+// DeviceRadixSort setup
+#define KEY_FLOAT
+#define PAYLOAD_UINT
+#define SHOULD_ASCEND
+
+// GPU sorting needs wave ops
+#pragma require wavebasic
+#pragma require waveballot
+#pragma use_dxc
+
+#include "../ThirdParty/DeviceRadixSort.hlsl"
+#include "GSUtils.hlsl"
+
+// Input buffers (from GSComponent)
+StructuredBuffer<float3> _Positions;        // World-space splat positions
+StructuredBuffer<float4> _Rotations;        // Splat rotations (quaternions)
+StructuredBuffer<float3> _Scales;           // Splat scales
+
+// View-space data output (for culling and tile assignment)
+RWStructuredBuffer<float4> _ViewData;       // xyz = view pos, w = visible (1) or culled (0)
+
+// Uniforms
+float4x4 _MatrixV;          // View matrix
+float4x4 _MatrixP;          // Projection matrix
+float4 _ScreenParams;       // x = width, y = height, z = 1/width, w = 1/height
+uint _SplatCount;           // Total number of splats
+float _NearPlane;           // Camera near plane
+float _FarPlane;            // Camera far plane
+float _SplatScale;          // Global splat scale multiplier
+
+// Model transform (must match shader)
+float3 _ModelPosition;      // Model position offset
+float4 _ModelRotation;      // Model rotation quaternion (x,y,z,w)
+float3 _ModelScale;         // Model scale
+
+// Convert local position to view space (applies model transform first)
+float3 LocalToView(float3 localPos)
+{
+    float3 worldPos = TransformPosition(localPos, _ModelPosition, _ModelRotation, _ModelScale);
+    return mul(_MatrixV, float4(worldPos, 1.0)).xyz;
+}
+
+// Convert view position to clip space
+float4 ViewToClip(float3 viewPos)
+{
+    return mul(_MatrixP, float4(viewPos, 1.0));
+}
+
+// Compute a depth-only sort key for back-to-front rendering
+// Returns a float where LARGER values = FARTHER from camera
+// With ascending sort, farther objects (larger keys) sort to the end,
+// but we render front-to-back in the sorted buffer, so we need to invert
+float ComputeDepthSortKey(float viewZ)
+{
+    // viewZ is negative for objects in front of camera (OpenGL convention)
+    // More negative = farther away
+    // We want back-to-front rendering for alpha blending:
+    // - Farther objects should render FIRST (lower sort key with ascending sort)
+    // - Closer objects should render LAST (higher sort key)
+    
+    // Normalize depth to [0, 1] where 0 = near, 1 = far
+    float normalizedDepth = saturate((-viewZ - _NearPlane) / (_FarPlane - _NearPlane));
+    
+    // For back-to-front: farther objects need SMALLER sort keys
+    // So we DON'T invert - farther objects have larger normalizedDepth,
+    // but we want them to have smaller sort keys
+    // Actually with SHOULD_ASCEND, smaller keys come first in the sorted array
+    // We iterate the sorted array from index 0, so smaller keys render first
+    // For back-to-front: far objects should render first = need smaller keys
+    // normalizedDepth: far = large value
+    // So we need to INVERT: sortKey = 1.0 - normalizedDepth
+    // Wait, let me think again...
+    
+    // After sorting (ascending): index 0 has smallest key, index N-1 has largest
+    // We render in order: index 0 first, then 1, 2, ... N-1
+    // For back-to-front: far objects must render first (index 0)
+    // Far objects have large normalizedDepth (close to 1)
+    // So far objects need SMALL sort keys
+    // sortKey = 1.0 - normalizedDepth would give: far=small key, near=large key ✓
+    
+    return 1.0 - normalizedDepth;
+}
+
+
+// Initialize sort buffers with identity mapping
+// Called once at the start of each frame
+[numthreads(GROUP_SIZE, 1, 1)]
+void InitSortBuffers(uint3 id : SV_DispatchThreadID)
+{
+    uint idx = id.x;
+    if (idx >= _SplatCount)
+        return;
+    
+    // Initialize indices to identity (each splat maps to itself initially)
+    b_sortPayload[idx] = idx;
+    
+    // Initialize sort keys to a large value (will be overwritten in CalcSortKeys)
+    b_sort[idx] = 1e30;
+}
+
+// Calculate view-space data for each splat
+// Outputs view position and visibility flag
+[numthreads(GROUP_SIZE, 1, 1)]
+void CalcViewData(uint3 id : SV_DispatchThreadID)
+{
+    uint idx = id.x;
+    if (idx >= _SplatCount)
+        return;
+    
+    // Get local position from buffer
+    float3 localPos = _Positions[idx];
+    
+    // Transform to view space (applies model transform, then view transform)
+    float3 viewPos = LocalToView(localPos);
+    
+    // Basic visibility check: behind camera or too far
+    // In view space, Z is typically negative for objects in front of the camera
+    float visible = 1.0;
+    
+    // Cull if behind near plane (view space z is negative, so -z < nearPlane means behind)
+    if (-viewPos.z < _NearPlane)
+        visible = 0.0;
+    
+    // Cull if beyond far plane
+    if (-viewPos.z > _FarPlane)
+        visible = 0.0;
+    
+    // Store view data
+    _ViewData[idx] = float4(viewPos, visible);
+}
+
+// Calculate sort keys based on depth only (no tiles)
+// This kernel runs after CalcViewData
+[numthreads(GROUP_SIZE, 1, 1)]
+void CalcSortKeys(uint3 id : SV_DispatchThreadID)
+{
+    uint idx = id.x;
+    if (idx >= _SplatCount)
+        return;
+    
+    // Get precomputed view data
+    float4 viewData = _ViewData[idx];
+    float3 viewPos = viewData.xyz;
+    float visible = viewData.w;
+    
+    // If culled, assign a very large sort key to push it to the end
+    if (visible < 0.5)
+    {
+        b_sort[idx] = 1e30;
+        return;
+    }
+    
+    // Transform to clip space for frustum culling
+    float4 clipPos = ViewToClip(viewPos);
+    
+    // Frustum culling in clip space
+    // Check if outside the view frustum (with some margin for large splats)
+    if (abs(clipPos.x) > clipPos.w * 1.5 || 
+        abs(clipPos.y) > clipPos.w * 1.5 ||
+        clipPos.z < 0 || clipPos.z > clipPos.w)
+    {
+        b_sort[idx] = 1e30;
+        return;
+    }
+    
+    // Compute depth-only sort key for back-to-front rendering
+    float sortKey = ComputeDepthSortKey(viewPos.z);
+    
+    b_sort[idx] = sortKey;
+}

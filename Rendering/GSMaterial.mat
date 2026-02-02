@@ -26,6 +26,7 @@ Material:
     m_TexEnvs: []
     m_Ints: []
     m_Floats:
+    - _DebugMode: 0
     - _SplatSize: 1
     m_Colors: []
   m_BuildTextureStacks: []

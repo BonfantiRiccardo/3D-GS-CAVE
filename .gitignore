@@ -1,2 +1,10 @@
 # Ingore model and point cloud files
 *.ply
+
+# Ignore Gaussian Splatting generated 3D model files
+Models/
+
+# *.meta
+
+# Ignore unused files
+Unused/
