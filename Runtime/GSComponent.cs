@@ -1,5 +1,6 @@
 using System;
 using UnityEngine;
+        using System.Text;
 
 namespace GaussianSplatting
 {   
@@ -221,7 +222,7 @@ namespace GaussianSplatting
         /// Initialize or update sorting resources for the current screen size.
         /// Called by the render pass before sorting.
         /// </summary>
-        public void InitializeSortingResources(int screenWidth, int screenHeight)
+        public void InitializeSortingResources()
         {
             if (ActiveSplatCount <= 0) 
             {
@@ -234,7 +235,7 @@ namespace GaussianSplatting
                 sortingResources = new GSSortingResources();
             }
 
-            sortingResources.Initialize(ActiveSplatCount, screenWidth, screenHeight);
+            sortingResources.Initialize(ActiveSplatCount);
         }
 
         /// <summary>
@@ -298,30 +299,210 @@ namespace GaussianSplatting
         }
 
         /// <summary>
-        /// Binds splat data buffers to a compute shader for sorting/processing.
+        /// Binds splat data buffers to a compute shader for sorting/processing via CommandBuffer.
         /// </summary>
-        public void BindToCompute(ComputeShader shader, int kernel)
+        public void BindToCompute(UnityEngine.Rendering.ComputeCommandBuffer cmd, ComputeShader shader, int kernel)
         {
             if (positionBuffer != null)
-                shader.SetBuffer(kernel, "_Positions", positionBuffer);
+                cmd.SetComputeBufferParam(shader, kernel, "_Positions", positionBuffer);
             if (rotationBuffer != null)
-                shader.SetBuffer(kernel, "_Rotations", rotationBuffer);
+                cmd.SetComputeBufferParam(shader, kernel, "_Rotations", rotationBuffer);
             if (scaleBuffer != null)
-                shader.SetBuffer(kernel, "_Scales", scaleBuffer);
+                cmd.SetComputeBufferParam(shader, kernel, "_Scales", scaleBuffer);
         }
 
-/*
-    // Start is called once before the first execution of Update after the MonoBehaviour is created
-    void Start()
-    {
-        
-    }
+        /*
+            // Start is called once before the first execution of Update after the MonoBehaviour is created
+            void Start()
+            {
 
-    // Update is called once per frame
-    void Update()
-    {
+            }
+
+            // Update is called once per frame
+            void Update()
+            {
+
+            }
+        */
+
+
+        public void DebugPrintSortedIndices(int count = 10)
+        {
+            if (sortingResources == null || !sortingResources.IsInitialized)
+            {
+                Debug.Log("Sorting resources not initialized");
+                return;
+            }
+
+            var sortedBuffer = sortingResources.GetSortedIndices();
+            var keysBuffer = sortingResources.GetSortKeys();
+            
+            uint[] indices = new uint[Mathf.Min(count, sortedBuffer.count)];
+            float[] keys = new float[Mathf.Min(count, keysBuffer.count)];
+            
+            sortedBuffer.GetData(indices);
+            keysBuffer.GetData(keys);
+
+            var cam = Camera.main;  // Use Camera.main instead of Camera.current for more reliable access
+
+            // Also print the actual positions to verify depth ordering
+            StringBuilder sb = new StringBuilder();
+            sb.AppendLine($"First {count} sorted indices (SplatCount={sortingResources.SplatCount}):");
+            for (int i = 0; i < indices.Length; i++)
+            {
+                uint idx = indices[i];
+                float key = keys[i];
+                if (idx < gsAsset.Positions.Length)
+                {
+                    Vector3 pos = gsAsset.Positions[idx];
+                    if (cam != null)
+                    {
+                        Vector3 camSpacePos = cam.worldToCameraMatrix.MultiplyPoint(pos);
+                        float depth = camSpacePos.z;
+                        sb.AppendLine($"  [{i}] Index: {idx}, Key: {key:F4}, Position: {pos}, CamRelDepth: {depth:F2}");
+                    }
+                    else
+                    {
+                        sb.AppendLine($"  [{i}] Index: {idx}, Key: {key:F4}, Position: {pos}");
+                    }
+                }
+            }
+            Debug.Log(sb.ToString());
+        }
+
+        //Debug call to read what is inside the position buffer, 
+        // the world positions buffer, and the sorted indices after kernel execution
+        public void DebugPrintBuffers()
+        {
+            if (positionBuffer == null)
+            {
+                Debug.Log("Position buffer not initialized");
+                return;
+            }
+
+            int count = Mathf.Min(10, positionBuffer.count);
+            Vector3[] positions = new Vector3[count];
+            positionBuffer.GetData(positions);
+
+            StringBuilder sb = new StringBuilder();
+            sb.AppendLine($"=== DEBUG BUFFER DUMP (count={positionBuffer.count}) ===");
+            
+            // 1. Positions from GPU buffer
+            sb.AppendLine("\n[1] Position Buffer (GPU):");
+            for (int i = 0; i < positions.Length; i++)
+            {
+                sb.AppendLine($"  [{i}] Position: {positions[i]}");
+            }
+
+            // 2. Compute world positions (applying model transform)
+            sb.AppendLine("\n[2] World Positions (after model transform):");
+            for (int i = 0; i < positions.Length; i++)
+            {
+                Vector3 worldPos = ModelRotation * Vector3.Scale(positions[i], modelScale) + modelPosition;
+                sb.AppendLine($"  [{i}] WorldPos: {worldPos}");
+            }
+
+            // 3. Camera data
+            var cam = Camera.main;
+            if (cam != null)
+            {
+                sb.AppendLine("\n[3] Camera Data:");
+                sb.AppendLine($"  Camera Position: {cam.transform.position}");
+                sb.AppendLine($"  Camera Forward: {cam.transform.forward}");
+                sb.AppendLine($"  Near Plane: {cam.nearClipPlane}");
+                sb.AppendLine($"  Far Plane: {cam.farClipPlane}");
+                sb.AppendLine($"  View Matrix:\n{cam.worldToCameraMatrix}");
+                
+                // 4. View-space positions (what the compute shader should compute)
+                sb.AppendLine("\n[4] Expected View-Space Positions (CPU calculation):");
+                for (int i = 0; i < positions.Length; i++)
+                {
+                    Vector3 worldPos = ModelRotation * Vector3.Scale(positions[i], modelScale) + modelPosition;
+                    Vector3 viewPos = cam.worldToCameraMatrix.MultiplyPoint(worldPos);
+                    float expectedKey = ComputeExpectedSortKey(viewPos.z, cam.nearClipPlane, cam.farClipPlane);
+                    sb.AppendLine($"  [{i}] ViewPos: {viewPos}, ViewZ: {viewPos.z:F4}, ExpectedKey: {expectedKey:F4}");
+                }
+            }
+            else
+            {
+                sb.AppendLine("\n[3] Camera: NOT FOUND (Camera.main is null)");
+            }
+
+            // 5. Sorting resources data
+            if (sortingResources != null && sortingResources.IsInitialized)
+            {
+                // View data from GPU
+                var viewDataBuffer = sortingResources.GetViewData();
+                if (viewDataBuffer != null)
+                {
+                    Vector4[] viewData = new Vector4[count];
+                    viewDataBuffer.GetData(viewData);
+                    sb.AppendLine("\n[5] ViewData Buffer (GPU - from CalcViewData kernel):");
+                    for (int i = 0; i < viewData.Length; i++)
+                    {
+                        sb.AppendLine($"  [{i}] ViewPos: ({viewData[i].x:F4}, {viewData[i].y:F4}, {viewData[i].z:F4}), Visible: {viewData[i].w}");
+                    }
+                }
+
+                // Sort keys from GPU
+                var keysBuffer = sortingResources.GetSortKeys();
+                if (keysBuffer != null)
+                {
+                    float[] keys = new float[count];
+                    keysBuffer.GetData(keys);
+                    sb.AppendLine("\n[6] SortKeys Buffer (GPU - from CalcSortKeys kernel):");
+                    for (int i = 0; i < keys.Length; i++)
+                    {
+                        sb.AppendLine($"  [{i}] Key: {keys[i]:F4}");
+                    }
+                }
+
+                // Sorted indices from GPU
+                var sortedBuffer = sortingResources.GetSortedIndices();
+                if (sortedBuffer != null)
+                {
+                    uint[] indices = new uint[count];
+                    sortedBuffer.GetData(indices);
+                    sb.AppendLine("\n[7] SortedIndices Buffer (GPU - after radix sort):");
+                    for (int i = 0; i < indices.Length; i++)
+                    {
+                        sb.AppendLine($"  [{i}] Index: {indices[i]}");
+                    }
+                }
+            }
+            else
+            {
+                sb.AppendLine("\n[5-7] Sorting resources not initialized");
+            }
+
+            Debug.Log(sb.ToString());
+        }
         
-    }
-*/
+        /// <summary>
+        /// Compute expected sort key using the same formula as the compute shader.
+        /// </summary>
+        private float ComputeExpectedSortKey(float viewZ, float nearPlane, float farPlane)
+        {
+            // Simply return viewZ for maximum precision
+            // Ascending sort with negative viewZ: far objects (more negative) come first
+            return viewZ;
+        }
+
+        // Add at the top of the class
+        private float lastDebugTime = 0f;
+        private const float DEBUG_INTERVAL = 1.0f; // Print every 1 second
+
+        // Add this method
+        void Update()
+        {
+            // Only debug in editor and at intervals
+#if UNITY_EDITOR
+            if (Time.time - lastDebugTime > DEBUG_INTERVAL)
+            {
+                lastDebugTime = Time.time;
+                DebugPrintBuffers();  // Comprehensive debug output
+            }
+#endif
+        }
     }
 }

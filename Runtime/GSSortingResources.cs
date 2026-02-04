@@ -55,9 +55,7 @@ namespace GaussianSplatting
         /// Initialize sorting resources for the given splat count.
         /// </summary>
         /// <param name="splatCount">Number of splats to sort</param>
-        /// <param name="screenWidth">Screen width in pixels (for future use)</param>
-        /// <param name="screenHeight">Screen height in pixels (for future use)</param>
-        public void Initialize(int splatCount, int screenWidth, int screenHeight)
+        public void Initialize(int splatCount)
         {
             // Release existing buffers if sizes changed
             if (SplatCount != splatCount)
@@ -132,28 +130,28 @@ namespace GaussianSplatting
 
 
         /// <summary>
-        /// Bind sorting input buffers to a compute shader.
+        /// Bind sorting input buffers to a compute shader via CommandBuffer.
         /// </summary>
-        public void BindSortInputs(ComputeShader shader, int kernel)
+        public void BindSortInputs(UnityEngine.Rendering.ComputeCommandBuffer cmd, ComputeShader shader, int kernel)
         {
-            shader.SetBuffer(kernel, "b_sortPayload", sortIndices);
-            shader.SetBuffer(kernel, "b_sort", sortKeys);
-            shader.SetBuffer(kernel, "_ViewData", viewData);
+            cmd.SetComputeBufferParam(shader, kernel, "b_sortPayload", sortIndices);
+            cmd.SetComputeBufferParam(shader, kernel, "b_sort", sortKeys);
+            cmd.SetComputeBufferParam(shader, kernel, "_ViewData", viewData);
         }
 
         /// <summary>
-        /// Bind sorting output buffers to a compute shader.
+        /// Bind sorting output buffers to a compute shader via CommandBuffer.
         /// </summary>
-        public void BindSortOutputs(ComputeShader shader, int kernel)
+        public void BindSortOutputs(UnityEngine.Rendering.CommandBuffer cmd, ComputeShader shader, int kernel)
         {
-            shader.SetBuffer(kernel, "b_altPayload", sortIndicesAlt);
-            shader.SetBuffer(kernel, "b_alt", sortKeysAlt);
+            cmd.SetComputeBufferParam(shader, kernel, "b_altPayload", sortIndicesAlt);
+            cmd.SetComputeBufferParam(shader, kernel, "b_alt", sortKeysAlt);
         }
         
         /// <summary>
-        /// Bind all radix sort buffers following the ThirdParty convention.
+        /// Bind all radix sort buffers following the ThirdParty convention via CommandBuffer.
         /// </summary>
-        public void BindRadixSortBuffers(ComputeShader shader, int kernel, bool useAltAsSource)
+        public void BindRadixSortBuffers(UnityEngine.Rendering.ComputeCommandBuffer cmd, ComputeShader shader, int kernel, bool useAltAsSource)
         {
             // The ThirdParty radix sort uses:
             // b_sort / b_alt for keys
@@ -163,21 +161,21 @@ namespace GaussianSplatting
             
             if (useAltAsSource)
             {
-                shader.SetBuffer(kernel, "b_sort", sortKeysAlt);
-                shader.SetBuffer(kernel, "b_alt", sortKeys);
-                shader.SetBuffer(kernel, "b_sortPayload", sortIndicesAlt);
-                shader.SetBuffer(kernel, "b_altPayload", sortIndices);
+                cmd.SetComputeBufferParam(shader, kernel, "b_sort", sortKeysAlt);
+                cmd.SetComputeBufferParam(shader, kernel, "b_alt", sortKeys);
+                cmd.SetComputeBufferParam(shader, kernel, "b_sortPayload", sortIndicesAlt);
+                cmd.SetComputeBufferParam(shader, kernel, "b_altPayload", sortIndices);
             }
             else
             {
-                shader.SetBuffer(kernel, "b_sort", sortKeys);
-                shader.SetBuffer(kernel, "b_alt", sortKeysAlt);
-                shader.SetBuffer(kernel, "b_sortPayload", sortIndices);
-                shader.SetBuffer(kernel, "b_altPayload", sortIndicesAlt);
+                cmd.SetComputeBufferParam(shader, kernel, "b_sort", sortKeys);
+                cmd.SetComputeBufferParam(shader, kernel, "b_alt", sortKeysAlt);
+                cmd.SetComputeBufferParam(shader, kernel, "b_sortPayload", sortIndices);
+                cmd.SetComputeBufferParam(shader, kernel, "b_altPayload", sortIndicesAlt);
             }
             
-            shader.SetBuffer(kernel, "b_globalHist", globalHistogram);
-            shader.SetBuffer(kernel, "b_passHist", passHistogram);
+            cmd.SetComputeBufferParam(shader, kernel, "b_globalHist", globalHistogram);
+            cmd.SetComputeBufferParam(shader, kernel, "b_passHist", passHistogram);
         }
         
         /// <summary>
@@ -201,6 +199,22 @@ namespace GaussianSplatting
             // After 4 radix passes, the result is in the original buffer
             // because each pass swaps source and destination
             return sortIndices;
+        }
+        
+        /// <summary>
+        /// Get the buffer containing sort keys (for debugging).
+        /// </summary>
+        public ComputeBuffer GetSortKeys()
+        {
+            return sortKeys;
+        }
+        
+        /// <summary>
+        /// Get the view data buffer (for debugging).
+        /// </summary>
+        public ComputeBuffer GetViewData()
+        {
+            return viewData;
         }
     }
 }

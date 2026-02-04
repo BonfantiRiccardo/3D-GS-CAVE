@@ -5,7 +5,6 @@ Shader "GaussianSplatting/GSShader"
 {
     Properties
     {
-        _SplatSize ("Splat Size", Float) = 1.0
     }
 
     SubShader
@@ -20,7 +19,7 @@ Shader "GaussianSplatting/GSShader"
             // Premultiplied alpha blending for correct compositing
             // Output = src.rgb * 1 + dst.rgb * (1 - src.a)
             // This requires shader to output (color.rgb * alpha, alpha)
-            Blend One OneMinusSrcAlpha  //Blend OneMinusDstAlpha One
+            Blend One OneMinusSrcAlpha
             ZWrite Off
             ZTest LEqual
             Cull Off
@@ -50,6 +49,8 @@ Shader "GaussianSplatting/GSShader"
             int _SplatCount;                // Total number of splats
             int _UseSortedIndices;          // Whether to use sorted indices
             int _SHRestCount;               // Number of SH rest floats per splat (3 * (bands^2 - 1))
+            int _SHBands;                   // Number of SH bands (0-3)
+            float3 _CameraWorldPos;         // Camera world position for view-dependent SH
 
             struct Attributes
             {
@@ -59,8 +60,11 @@ Shader "GaussianSplatting/GSShader"
             struct Varyings
             {
                 float4 positionCS : SV_POSITION;
-                float4 color : COLOR;           // rgb = color, a = opacity
+                float4 color : COLOR;           // rgb = SH DC color or view-dependent color, a = opacity
                 float2 uv : TEXCOORD0;          // UV for Gaussian falloff (-1 to 1 in ellipse space)
+                nointerpolation float3 worldPos : TEXCOORD1;    // Splat world position for view-dependent SH
+                nointerpolation uint splatIndex : TEXCOORD2;    // Splat index for SH lookup
+                nointerpolation uint sortedIndex : TEXCOORD3;   // Sorted index for debug coloring
             };
 
 
@@ -71,6 +75,9 @@ Shader "GaussianSplatting/GSShader"
                 output.positionCS = float4(0, 0, 2, 1);  // Default: behind far plane (culled)
                 output.color = float4(0, 0, 0, 0);
                 output.uv = float2(0, 0);
+                output.worldPos = float3(0, 0, 0);
+                output.splatIndex = 0;
+                output.sortedIndex = 0;
 
                 // Decode vertex: 6 vertices per splat (2 triangles forming a quad)
                 uint sortedIndex = input.vertexID / 6;
@@ -82,6 +89,7 @@ Shader "GaussianSplatting/GSShader"
 
                 // Get actual splat index (sorted or unsorted)
                 uint splatIndex = sortedIndex;
+                
                 if (_UseSortedIndices != 0)
                 {
                     splatIndex = _SortedIndices[sortedIndex];
@@ -118,8 +126,8 @@ Shader "GaussianSplatting/GSShader"
                 float3 viewPos = viewPos4.xyz;
                 
                 // Cull if behind camera (view space z should be negative)
-                if (viewPos.z >= -0.1)
-                    return output;
+                //if (viewPos.z >= -0.1)
+                 //   return output;
 
                 // Compute 3D covariance in world space
                 float3 covA, covB;
@@ -164,16 +172,35 @@ Shader "GaussianSplatting/GSShader"
 
                 // UV for fragment shader
                 output.uv = corner;
+                
+                // Pass world position and splat index for fragment shader SH evaluation
+                output.worldPos = worldPos;
+                output.splatIndex = splatIndex;
+                output.sortedIndex = sortedIndex;
 
-                // Convert SH DC coefficients to RGB color
-                float3 rgb = SHToColor(shColor.rgb);
+                // Compute view direction in world space (from splat to camera)
+                float3 viewDir = normalize(_CameraWorldPos - worldPos);
+                
+                // Evaluate spherical harmonics for view-dependent color
+                // Uses SH bands based on available data
+                float3 rgb;
+                if (_SHBands > 0 && _SHRestCount > 0)
+                {
+                    // Full SH evaluation with higher bands
+                    rgb = EvaluateSH(shColor.rgb, _SHRest, _SHRestCount, splatIndex, viewDir, _SHBands);
+                }
+                else
+                {
+                    // DC only (band 0)
+                    rgb = SHToColor(shColor.rgb);
+                }
                 output.color = float4(rgb, shColor.a);
 
                 return output;
             }
 
             half4 Frag(Varyings input) : SV_Target
-            {
+            {   
                 // Compute squared distance from center in ellipse space
                 // UV spans [-1, 1] representing 3 standard deviations
                 float r2 = dot(input.uv, input.uv);
@@ -183,8 +210,8 @@ Shader "GaussianSplatting/GSShader"
                     discard;
 
                 // Reference Gaussian falloff used by gsplat: exp(-A * r^2) with A=4.0
-                float gaussian = exp(-4.0 * r2);
-                float alpha = gaussian * input.color.a;
+                float gaussian = exp(- 4.0 * r2);
+                float alpha = saturate(gaussian * input.color.a);
 
                 // Discard nearly transparent pixels
                 if (alpha < 1.0 / 255.0)
@@ -192,6 +219,14 @@ Shader "GaussianSplatting/GSShader"
 
                 // Output premultiplied alpha
                 return half4(input.color.rgb * alpha, alpha);
+
+                // Debug: red color by sorted index
+                //return half4(input.splatIndex/(float(_SplatCount)),0,0,1);
+
+                /*
+                // Debug
+                float alpha = 1.0; // Force opaque
+                return half4(input.color.rgb, alpha);*/
             }
             ENDHLSL
         }

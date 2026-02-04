@@ -90,7 +90,7 @@ namespace GaussianSplatting
             public float splatSize = 1.0f;    //Global scale multiplier for per-splat size
             
             [Header("Sorting")]
-            public bool enableSorting = true;   // Enable depth-based sorting
+            // Gaussian Splatting requires back-to-front rendering for correct alpha blending (alpha compositing is not commutative)
             public ComputeShader sortingShader; // GSSorting.compute
         }
 
@@ -115,7 +115,7 @@ namespace GaussianSplatting
             {
                 this.settings = settings;
             }
-            
+
             /// <summary>
             /// Check if camera has moved enough to require re-sorting.
             /// </summary>
@@ -125,27 +125,27 @@ namespace GaussianSplatting
                 {
                     return true;  // First frame, always sort
                 }
-                
+
                 Vector3 currentPos = camera.transform.position;
                 Quaternion currentRot = camera.transform.rotation;
-                
+
                 // Check position change
                 float posDelta = Vector3.Distance(currentPos, lastCameraPosition);
                 if (posDelta > CameraPositionThreshold)
                 {
                     return true;
                 }
-                
+
                 // Check rotation change (using dot product for efficiency)
                 float rotDot = Quaternion.Dot(currentRot, lastCameraRotation);
                 if (1.0f - Mathf.Abs(rotDot) > CameraRotationThreshold)
                 {
                     return true;
                 }
-                
+
                 return false;
             }
-            
+
             /// <summary>
             /// Cache the current camera state.
             /// </summary>
@@ -165,6 +165,7 @@ namespace GaussianSplatting
                 public float splatSize;
                 public Matrix4x4 viewMatrix;
                 public Matrix4x4 projMatrix;
+                public Vector3 cameraWorldPos;  // Camera world position for view-dependent SH
                 public GSComponent[] components;
             }
 
@@ -238,7 +239,7 @@ namespace GaussianSplatting
                         continue;
                     }
 
-                    component.InitializeSortingResources((int)data.screenParams.x, (int)data.screenParams.y);
+                    component.InitializeSortingResources();
                     var resources = component.SortingResources;
                     if (resources == null || !resources.IsInitialized)
                     {
@@ -248,7 +249,7 @@ namespace GaussianSplatting
                     int splatCount = resources.SplatCount;
                     int groups = Mathf.CeilToInt((float)splatCount / SortGroupSize);
 
-                    // Common uniforms (no more tile-related uniforms)
+                    // Common uniforms
                     context.cmd.SetComputeMatrixParam(data.sortingShader, "_MatrixV", data.viewMatrix);
                     context.cmd.SetComputeMatrixParam(data.sortingShader, "_MatrixP", data.projMatrix);
                     context.cmd.SetComputeVectorParam(data.sortingShader, "_ScreenParams", data.screenParams);
@@ -256,24 +257,24 @@ namespace GaussianSplatting
                     context.cmd.SetComputeFloatParam(data.sortingShader, "_NearPlane", data.nearPlane);
                     context.cmd.SetComputeFloatParam(data.sortingShader, "_FarPlane", data.farPlane);
                     
-                    // Model transform uniforms (must match shader)
+                    // Model transform uniforms
                     context.cmd.SetComputeVectorParam(data.sortingShader, "_ModelPosition", component.modelPosition);
                     Quaternion sortRot = component.ModelRotation;
                     context.cmd.SetComputeVectorParam(data.sortingShader, "_ModelRotation", new Vector4(sortRot.x, sortRot.y, sortRot.z, sortRot.w));
                     context.cmd.SetComputeVectorParam(data.sortingShader, "_ModelScale", component.modelScale);
 
                     // Init sort buffers
-                    resources.BindSortInputs(data.sortingShader, kernelInitSortBuffers);
-                    component.BindToCompute(data.sortingShader, kernelInitSortBuffers);
+                    resources.BindSortInputs(context.cmd, data.sortingShader, kernelInitSortBuffers);
+                    component.BindToCompute(context.cmd, data.sortingShader, kernelInitSortBuffers);
                     context.cmd.DispatchCompute(data.sortingShader, kernelInitSortBuffers, groups, 1, 1);
 
                     // View data
-                    resources.BindSortInputs(data.sortingShader, kernelCalcViewData);
-                    component.BindToCompute(data.sortingShader, kernelCalcViewData);
+                    resources.BindSortInputs(context.cmd, data.sortingShader, kernelCalcViewData);
+                    component.BindToCompute(context.cmd, data.sortingShader, kernelCalcViewData);
                     context.cmd.DispatchCompute(data.sortingShader, kernelCalcViewData, groups, 1, 1);
 
                     // Sort keys
-                    resources.BindSortInputs(data.sortingShader, kernelCalcSortKeys);
+                    resources.BindSortInputs(context.cmd, data.sortingShader, kernelCalcSortKeys);
                     context.cmd.DispatchCompute(data.sortingShader, kernelCalcSortKeys, groups, 1, 1);
 
                     // Radix sort (4 passes)
@@ -283,10 +284,10 @@ namespace GaussianSplatting
                     for (int pass = 0; pass < 4; pass++)
                     {
                         bool useAltAsSource = (pass % 2) == 1;
-                        resources.BindRadixSortBuffers(data.sortingShader, kernelInitRadix, useAltAsSource);
-                        resources.BindRadixSortBuffers(data.sortingShader, kernelUpsweep, useAltAsSource);
-                        resources.BindRadixSortBuffers(data.sortingShader, kernelScan, useAltAsSource);
-                        resources.BindRadixSortBuffers(data.sortingShader, kernelDownsweep, useAltAsSource);
+                        resources.BindRadixSortBuffers(context.cmd, data.sortingShader, kernelInitRadix, useAltAsSource);
+                        resources.BindRadixSortBuffers(context.cmd, data.sortingShader, kernelUpsweep, useAltAsSource);
+                        resources.BindRadixSortBuffers(context.cmd, data.sortingShader, kernelScan, useAltAsSource);
+                        resources.BindRadixSortBuffers(context.cmd, data.sortingShader, kernelDownsweep, useAltAsSource);
 
                         context.cmd.SetComputeIntParam(data.sortingShader, "e_radixShift", pass * 8);
                         context.cmd.DispatchCompute(data.sortingShader, kernelInitRadix, 1, 1, 1);
@@ -309,6 +310,9 @@ namespace GaussianSplatting
                 data.material.SetMatrix("_MatrixV", data.viewMatrix);
                 data.material.SetMatrix("_MatrixP", data.projMatrix);
                 data.material.SetFloat("_SplatSize", data.splatSize);
+                
+                // Set camera world position for view-dependent spherical harmonics
+                data.material.SetVector("_CameraWorldPos", data.cameraWorldPos);
 
                 for (int i = 0; i < data.components.Length; i++)
                 {
@@ -323,6 +327,9 @@ namespace GaussianSplatting
                     Quaternion rot = component.ModelRotation;
                     data.material.SetVector("_ModelRotation", new Vector4(rot.x, rot.y, rot.z, rot.w));
                     data.material.SetVector("_ModelScale", component.modelScale);
+                    
+                    // Set SH bands count for view-dependent color computation
+                    data.material.SetInt("_SHBands", component.ShBandsNumber);
 
                     component.BindTo(data.material);
                     context.cmd.DrawProcedural(
@@ -367,7 +374,8 @@ namespace GaussianSplatting
                 Matrix4x4 viewMatrix = cameraData.GetViewMatrix();
                 Matrix4x4 projMatrix = GL.GetGPUProjectionMatrix(cameraData.camera.projectionMatrix, false);
 
-                if (settings.enableSorting && settings.sortingShader != null)
+                // Sorting pass - always enabled as GS requires back-to-front rendering
+                if (settings.sortingShader != null)
                 {
                     using (var sortBuilder = renderGraph.AddComputePass<SortPassData>(sortPassName, out var sortPassData))
                     {
@@ -415,6 +423,7 @@ namespace GaussianSplatting
                     passData.splatSize = settings.splatSize;
                     passData.viewMatrix = viewMatrix;
                     passData.projMatrix = projMatrix;
+                    passData.cameraWorldPos = cameraData.camera.transform.position;
 
                     int componentCount = components?.Count ?? 0;
                     passData.components = componentCount > 0 ? new GSComponent[componentCount] : Array.Empty<GSComponent>();
