@@ -49,16 +49,11 @@ static const float SH_C3_6 = -0.5900436;
 float3x3 QuatToRotationMatrix(float4 q)
 {
     float x = q.x, y = q.y, z = q.z, w = q.w;
-    
-    float x2 = x + x, y2 = y + y, z2 = z + z;
-    float xx = x * x2, xy = x * y2, xz = x * z2;
-    float yy = y * y2, yz = y * z2, zz = z * z2;
-    float wx = w * x2, wy = w * y2, wz = w * z2;
 
     return float3x3(
-        1.0 - (yy + zz), xy - wz, xz + wy,
-        xy + wz, 1.0 - (xx + zz), yz - wx,
-        xz - wy, yz + wx, 1.0 - (xx + yy)
+        1.0 - 2*(y*y + z*z), 2*(x*y - w*z), 2*(x*z + w*y),
+        2*(x*y + w*z), 1.0 - 2*(x*x + z*z), 2*(y*z - w*x),
+        2*(x*z - w*y), 2*(y*z + w*x), 1.0 - 2*(x*x + y*y)
     );
 }
 
@@ -68,33 +63,34 @@ float3x3 QuatToRotationMatrix(float4 q)
 void ComputeCovariance3D(float4 quat, float3 scale, out float3 covA, out float3 covB)
 {
     float3x3 R = QuatToRotationMatrix(quat);
+
+    float3x3 S = float3x3(
+        scale.x, 0.0, 0.0,
+        0.0, scale.y, 0.0,
+        0.0, 0.0, scale.z
+    );
     
     // M = R * S (scale matrix is diagonal, so multiply columns by scale)
-    float3x3 M = float3x3(
-        R[0] * scale.x,
-        R[1] * scale.y,
-        R[2] * scale.z
-    );
+    float3x3 M = mul(R, S);
+
+    float3x3 sigma = mul(M, transpose(M));
     
     // Cov = M * M^T (symmetric matrix, only 6 unique values)
     // For row-major M, (M * M^T)[i][j] = dot(row_i, row_j) = dot(M[i], M[j])
-    covA = float3(
-        dot(M[0], M[0]),  // Σ[0][0]
-        dot(M[0], M[1]),  // Σ[0][1]
-        dot(M[0], M[2])   // Σ[0][2]
-    );
-    covB = float3(
-        dot(M[1], M[1]),  // Σ[1][1]
-        dot(M[1], M[2]),  // Σ[1][2]
-        dot(M[2], M[2])   // Σ[2][2]
-    );
-}
+    covA = float3(sigma._m00,  // Σ[0][0]
+                  sigma._m01,  // Σ[0][1]
+                  sigma._m02); // Σ[0][2]
+    covB = float3(sigma._m11,  // Σ[1][1]
+                  sigma._m12,  // Σ[1][2]
+                  sigma._m22); // Σ[2][2]
+    }
 
 // Project 3D covariance to 2D screen space using EWA (Elliptical Weighted Average)
 // Uses the Jacobian of perspective projection for accurate ellipse computation
 // viewMatrix: world-to-view transformation matrix
+// projMatrix: projection matrix for extracting tan(fov)
 // Returns: (cov2D[0][0], cov2D[0][1], cov2D[1][1])
-float3 ProjectCovariance(float3 covA, float3 covB, float3 viewPos, float focal, float3x3 viewRotation)
+float3 ProjectCovariance(float3 covA, float3 covB, float3 viewPos, float focal, float3x3 viewRotation, float4x4 projMatrix)
 {
     // Build symmetric 3D covariance matrix
     float3x3 cov3D = float3x3(
@@ -103,17 +99,28 @@ float3 ProjectCovariance(float3 covA, float3 covB, float3 viewPos, float focal, 
         covA.z, covB.y, covB.z
     );
     
+    // Clamp view position to prevent numerical instability for splats near edges
+    // This is needed for splats visible in view but heavily clipped
+    float aspect = projMatrix._m00 / projMatrix._m11;
+    float tanFovX = 1.0 / projMatrix._m00;
+    float tanFovY = 1.0 / (projMatrix._m11 * aspect);
+    float limX = 1.3 * tanFovX;
+    float limY = 1.3 * tanFovY;
+    float3 clampedViewPos = viewPos;
+    clampedViewPos.x = clamp(viewPos.x / viewPos.z, -limX, limX) * viewPos.z;
+    clampedViewPos.y = clamp(viewPos.y / viewPos.z, -limY, limY) * viewPos.z;
+    
     // Jacobian of perspective projection
     // J = | fx/z    0    -fx*x/z² |
     //     |   0   fy/z   -fy*y/z² |
     // Assumes fx = fy = focal
-    float z = viewPos.z;
+    float z = clampedViewPos.z;
     float invZ = 1.0 / z;
     float invZ2 = invZ * invZ;
     
     float3x3 J = float3x3(
-        focal * invZ, 0.0, -focal * viewPos.x * invZ2,
-        0.0, focal * invZ, -focal * viewPos.y * invZ2,
+        focal * invZ, 0.0, -focal * clampedViewPos.x * invZ2,
+        0.0, focal * invZ, -focal * clampedViewPos.y * invZ2,
         0.0, 0.0, 0.0
     );
     
@@ -129,11 +136,48 @@ float3 ProjectCovariance(float3 covA, float3 covB, float3 viewPos, float focal, 
     return float3(cov2D_full[0][0], cov2D_full[0][1], cov2D_full[1][1]);
 }
 
+// from "EWA Splatting" (Zwicker et al 2002) eq. 31
+float3 CalcCovariance2D(float3 worldPos, float3 cov3d0, float3 cov3d1, float4x4 matrixV, float4x4 matrixP, float4 screenParams)
+{
+    float4x4 viewMatrix = matrixV;
+    float3 viewPos = mul(viewMatrix, float4(worldPos, 1)).xyz;
+
+    // this is needed in order for splats that are visible in view but clipped "quite a lot" to work
+    float aspect = matrixP._m00 / matrixP._m11;
+    float tanFovX = rcp(matrixP._m00);
+    float tanFovY = rcp(matrixP._m11 * aspect);
+    float limX = 1.3 * tanFovX;
+    float limY = 1.3 * tanFovY;
+    viewPos.x = clamp(viewPos.x / viewPos.z, -limX, limX) * viewPos.z;
+    viewPos.y = clamp(viewPos.y / viewPos.z, -limY, limY) * viewPos.z;
+
+    float focal = screenParams.x * matrixP._m00 / 2;
+
+    float3x3 J = float3x3(
+        focal / viewPos.z, 0, -(focal * viewPos.x) / (viewPos.z * viewPos.z),
+        0, focal / viewPos.z, -(focal * viewPos.y) / (viewPos.z * viewPos.z),
+        0, 0, 0
+    );
+    float3x3 W = (float3x3)viewMatrix;
+    float3x3 T = mul(J, W);
+    float3x3 V = float3x3(
+        cov3d0.x, cov3d0.y, cov3d0.z,
+        cov3d0.y, cov3d1.x, cov3d1.y,
+        cov3d0.z, cov3d1.y, cov3d1.z
+    );
+    float3x3 cov = mul(T, mul(V, transpose(T)));
+
+    // Low pass filter to make each splat at least 1px size.
+    cov._m00 += 0.3;
+    cov._m11 += 0.3;
+    return float3(cov._m00, cov._m01, cov._m11);
+}
+
 // Compute eigenvalues and eigenvectors of 2D covariance for ellipse rendering
 // Input: cov2D = (a, b, c) representing matrix | a  b |
 //                                               | b  c |
 // Returns: xy = major axis direction (normalized), zw = (major_radius, minor_radius) in pixels
-float4 ComputeEllipseAxes(float3 cov2D)
+void ComputeEllipseAxes(float3 cov2D, out float2 axis1, out float2 axis2, out float radius1, out float radius2)
 {
     float a = cov2D.x;  // cov[0][0]
     float b = cov2D.y;  // cov[0][1]
@@ -161,12 +205,31 @@ float4 ComputeEllipseAxes(float3 cov2D)
     {
         v1 = (a >= c) ? float2(1, 0) : float2(0, 1);
     }
+
+    v1.y = -v1.y;
+    // The 2nd eigenvector is just a 90 degree rotation of the first since Gaussian axes are orthogonal
+    float2 v2 = float2(v1.y, -v1.x);
+
+    // scaling components
+    v1 *= sqrt(lambda1);
+    v2 *= sqrt(lambda2);
+
+    float radius = 1.5;
+    v1 *= radius;
+    v2 *= radius;
     
+    axis1 = v1;
+    axis2 = v2;
+
     // Radii = sqrt(eigenvalues) * 3 to cover 3-sigma (99.7% of Gaussian mass)
     float r1 = 3.0 * sqrt(lambda1);
     float r2 = 3.0 * sqrt(lambda2);
-    
+
+    radius1 = length(v1);
+    radius2 = length(v2);
+    /*
     return float4(v1.x, v1.y, r1, r2);
+    */
 }
 
 
@@ -177,6 +240,39 @@ float3 SHToColor(float3 sh_dc)
 {
     float3 rgb = sh_dc * SH_C0 + 0.5;
     return saturate(rgb);
+}
+
+// ============================================================================
+// Color Space Conversion
+// Gaussian splat colors (from SH) are typically in sRGB/gamma space.
+// When Unity is in Linear color space, we need to convert to linear.
+// ============================================================================
+
+// Convert a single channel from sRGB (gamma ~2.2) to linear
+// Uses the exact sRGB transfer function
+float GammaToLinearChannel(float c)
+{
+    // sRGB transfer function:
+    // if (c <= 0.04045) linear = c / 12.92
+    // else linear = pow((c + 0.055) / 1.055, 2.4)
+    return (c <= 0.04045) ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4);
+}
+
+// Convert RGB color from sRGB (gamma) to linear color space
+float3 GammaToLinear(float3 color)
+{
+    return float3(
+        GammaToLinearChannel(color.r),
+        GammaToLinearChannel(color.g),
+        GammaToLinearChannel(color.b)
+    );
+}
+
+// Simplified gamma to linear using power 2.2 approximation
+// Faster but less accurate than full sRGB transfer function
+float3 GammaToLinearFast(float3 color)
+{
+    return pow(max(color, 0.0), 2.2);
 }
 
 // ============================================================================

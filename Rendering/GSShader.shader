@@ -112,7 +112,7 @@ Shader "GaussianSplatting/GSShader"
                 if (alpha0 < 1.0 / 255.0)
                     return output;
 
-                // Match reference: clip = min(1, sqrt(-log(1/255/alpha)) / 2)
+                // Compute clipping factor based on alpha
                 float clip = min(1.0, sqrt(-log((1.0 / 255.0) / max(alpha0, 1e-6))) * 0.5);
                 float2 corner = quadCorners[cornerIndex] * clip;
 
@@ -126,8 +126,8 @@ Shader "GaussianSplatting/GSShader"
                 float3 viewPos = viewPos4.xyz;
                 
                 // Cull if behind camera (view space z should be negative)
-                //if (viewPos.z >= -0.1)
-                 //   return output;
+                if (viewPos.z >= -0.1)
+                   return output;
 
                 // Compute 3D covariance in world space
                 float3 covA, covB;
@@ -140,14 +140,17 @@ Shader "GaussianSplatting/GSShader"
                 float3x3 viewRotation = (float3x3)UNITY_MATRIX_V;
 
                 // Project to 2D covariance
-                float3 cov2D = ProjectCovariance(covA, covB, viewPos, focal, viewRotation);
+                //float3 cov2D = ProjectCovariance(covA, covB, viewPos, focal, viewRotation, UNITY_MATRIX_P);
+                float3 cov2D = CalcCovariance2D(worldPos, covA, covB, UNITY_MATRIX_MV, UNITY_MATRIX_P, _ScreenParams);
 
                 // Compute ellipse axes
-                float4 ellipse = ComputeEllipseAxes(cov2D);
-                float2 axis1 = ellipse.xy;
-                float2 axis2 = float2(-axis1.y, axis1.x);
-                float radius1 = ellipse.z;
-                float radius2 = ellipse.w;
+                float2 axis1, axis2;
+                float radius1, radius2;
+                ComputeEllipseAxes(cov2D, axis1, axis2, radius1, radius2);
+                //float2 axis1 = ellipse.xy;
+                //float2 axis2 = float2(-axis1.y, axis1.x);
+                //float radius1 = ellipse.z;
+                //float radius2 = ellipse.w;
 
                 // Skip if too small (< 1 pixel)
                 if (radius1 < 1.0 || radius2 < 1.0)
@@ -159,7 +162,7 @@ Shader "GaussianSplatting/GSShader"
                 radius2 = min(radius2, maxRadius);
 
                 // Compute screen-space offset
-                float2 screenOffset = corner.x * axis1 * radius1 + corner.y * axis2 * radius2;
+                float2 screenOffset = corner.x * axis1 + corner.y * axis2;
 
                 // Project center to clip space
                 float4 centerClip = mul(UNITY_MATRIX_P, viewPos4);
@@ -194,6 +197,13 @@ Shader "GaussianSplatting/GSShader"
                     // DC only (band 0)
                     rgb = SHToColor(shColor.rgb);
                 }
+                
+                // Convert from gamma (sRGB) to linear color space if Unity is in linear mode
+                // Gaussian splat colors from SH are stored/computed in sRGB space
+                #ifndef UNITY_COLORSPACE_GAMMA
+                    rgb = GammaToLinear(rgb);
+                #endif
+                
                 output.color = float4(rgb, shColor.a);
 
                 return output;
@@ -209,8 +219,8 @@ Shader "GaussianSplatting/GSShader"
                 if (r2 > 1.0)
                     discard;
 
-                // Reference Gaussian falloff used by gsplat: exp(-A * r^2) with A=4.0
-                float gaussian = exp(- 4.0 * r2);
+                // Gaussian Falloff: exp(-A * r^2) with A=1
+                float gaussian = exp(- r2);
                 float alpha = saturate(gaussian * input.color.a);
 
                 // Discard nearly transparent pixels
@@ -222,6 +232,12 @@ Shader "GaussianSplatting/GSShader"
 
                 // Debug: red color by sorted index
                 //return half4(input.splatIndex/(float(_SplatCount)),0,0,1);
+
+                //Debug: only draw the splat centers
+                //if (length(input.uv) > 0.02)
+                //    discard;
+
+                //return half4(1,0,0,1);
 
                 /*
                 // Debug
