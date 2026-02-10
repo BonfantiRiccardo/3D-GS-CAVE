@@ -76,7 +76,6 @@ void ComputeCovariance3D(float4 quat, float3 scale, out float3 covA, out float3 
     float3x3 sigma = mul(M, transpose(M));
     
     // Cov = M * M^T (symmetric matrix, only 6 unique values)
-    // For row-major M, (M * M^T)[i][j] = dot(row_i, row_j) = dot(M[i], M[j])
     covA = float3(sigma._m00,  // Σ[0][0]
                   sigma._m01,  // Σ[0][1]
                   sigma._m02); // Σ[0][2]
@@ -241,12 +240,6 @@ float3 SHToColor(float3 sh_dc)
     float3 rgb = sh_dc * SH_C0 + 0.5;
     return saturate(rgb);
 }
-
-// ============================================================================
-// Color Space Conversion
-// Gaussian splat colors (from SH) are typically in sRGB/gamma space.
-// When Unity is in Linear color space, we need to convert to linear.
-// ============================================================================
 
 // Convert a single channel from sRGB (gamma ~2.2) to linear
 // Uses the exact sRGB transfer function

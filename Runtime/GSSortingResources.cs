@@ -13,6 +13,8 @@ namespace GaussianSplatting
         private const int RADIX_PASSES = 4;     // Number of radix passes (32-bit / 8-bit)
         private const int PART_SIZE = 3840;     // Partition size for radix sort
 
+        // SplatViewData struct size: float4 pos + float2 axis1 + float2 axis2 + uint2 color = 4*4 + 2*4 + 2*4 + 2*4 = 32 bytes
+        private const int SPLAT_VIEW_DATA_STRIDE = 40;
 
         // Primary sort buffers
         private ComputeBuffer sortIndices;      // uint[splatCount] - Sort indices (payload) - maps sorted position to original splat index
@@ -22,6 +24,9 @@ namespace GaussianSplatting
 
         // View data buffer for caching view-space calculations
         private ComputeBuffer viewData;         // float4[splatCount] - View data - cached view-space positions and visibility flags (xyz=viewPos, w=visible)
+        
+        // Precomputed splat view data for efficient rendering (clip pos, ellipse axes, color)
+        private ComputeBuffer splatViewData;    // SplatViewData[splatCount] - precomputed per-splat rendering data
         
         // Radix sort histogram buffers
         private ComputeBuffer globalHistogram;  // uint[RADIX * RADIX_PASSES] - global histogram
@@ -39,7 +44,7 @@ namespace GaussianSplatting
         public int TileCountY => 1;
         public int TileSize => 1;
         
-        public bool IsInitialized => sortIndices != null && sortKeys != null;
+        public bool IsInitialized => sortIndices != null && sortKeys != null && splatViewData != null;
         
         // Public accessors for buffers
         public ComputeBuffer SortIndices => sortIndices;
@@ -47,6 +52,7 @@ namespace GaussianSplatting
         public ComputeBuffer SortKeys => sortKeys;
         public ComputeBuffer SortKeysAlt => sortKeysAlt;
         public ComputeBuffer ViewData => viewData;
+        public ComputeBuffer SplatViewDataBuffer => splatViewData;
         public ComputeBuffer GlobalHistogram => globalHistogram;
         public ComputeBuffer PassHistogram => passHistogram;
         
@@ -84,6 +90,9 @@ namespace GaussianSplatting
             // Allocate view data buffer
             viewData = new ComputeBuffer(splatCount, sizeof(float) * 4);
             
+            // Allocate precomputed splat view data buffer for efficient rendering
+            splatViewData = new ComputeBuffer(splatCount, SPLAT_VIEW_DATA_STRIDE);
+            
             // Allocate histogram buffers for radix sort
             // Global histogram: RADIX * RADIX_PASSES entries
             globalHistogram = new ComputeBuffer(RADIX * RADIX_PASSES, sizeof(uint));
@@ -104,6 +113,7 @@ namespace GaussianSplatting
             ReleaseBuffer(ref sortKeys);
             ReleaseBuffer(ref sortKeysAlt);
             ReleaseBuffer(ref viewData);
+            ReleaseBuffer(ref splatViewData);
             ReleaseBuffer(ref globalHistogram);
             ReleaseBuffer(ref passHistogram);
             ReleaseBuffer(ref sortParams);
@@ -137,6 +147,23 @@ namespace GaussianSplatting
             cmd.SetComputeBufferParam(shader, kernel, "b_sortPayload", sortIndices);
             cmd.SetComputeBufferParam(shader, kernel, "b_sort", sortKeys);
             cmd.SetComputeBufferParam(shader, kernel, "_ViewData", viewData);
+        }
+        
+        /// <summary>
+        /// Bind SplatViewData buffer to a compute shader for precomputation.
+        /// CalcSplatViewData writes using original indices, so no sort buffer needed here.
+        /// </summary>
+        public void BindSplatViewDataOutput(UnityEngine.Rendering.ComputeCommandBuffer cmd, ComputeShader shader, int kernel)
+        {
+            cmd.SetComputeBufferParam(shader, kernel, "_SplatViewData", splatViewData);
+        }
+        
+        /// <summary>
+        /// Get the precomputed splat view data buffer for rendering.
+        /// </summary>
+        public ComputeBuffer GetSplatViewData()
+        {
+            return splatViewData;
         }
 
         /// <summary>

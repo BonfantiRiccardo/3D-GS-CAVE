@@ -1,0 +1,19 @@
+﻿{
+  "name": "com.immersivevis.gaussian-splatting",
+  "version": "0.1.0",
+  "displayName": "Gaussian Splatting Renderer",
+  "description": "Gaussian Splatting renderer for Unity URP.",
+  "unity": "6000.3",
+  "dependencies": {
+    "com.unity.render-pipelines.universal": "17.3.0"
+  },
+  "keywords": [
+    "gaussian",
+    "splatting",
+    "renderer",
+    "urp"
+  ],
+  "author": {
+    "name": "ImmersiveVis"
+  }
+}

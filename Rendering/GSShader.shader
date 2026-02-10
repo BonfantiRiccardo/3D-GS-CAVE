@@ -1,6 +1,6 @@
-// Gaussian Splatting Shader - Depth-sorted rendering with proper 2D covariance projection
-// Implements standard 3DGS projection: 3D covariance -> 2D screen-space ellipse
-// Requires sorted indices for correct alpha blending (back-to-front)
+// Gaussian Splatting Shader - Efficient instanced rendering with precomputed view data
+// Uses SplatViewData buffer precomputed in compute shader for minimal vertex work
+// Implements back-to-front rendering for correct alpha compositing
 Shader "GaussianSplatting/GSShader"
 {
     Properties
@@ -16,9 +16,8 @@ Shader "GaussianSplatting/GSShader"
             Name "GSShader"
             Tags { "LightMode"="UniversalForward" }
 
-            // Premultiplied alpha blending for correct compositing
-            // Output = src.rgb * 1 + dst.rgb * (1 - src.a)
-            // This requires shader to output (color.rgb * alpha, alpha)
+            // Back-to-front blending (reverse compositing order)
+            // Splats are rendered far-to-near
             Blend One OneMinusSrcAlpha
             ZWrite Off
             ZTest LEqual
@@ -31,203 +30,111 @@ Shader "GaussianSplatting/GSShader"
             #pragma require compute
 
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
-            #include "GSUtils.hlsl"
 
-            // Buffers
-            StructuredBuffer<float3> _Positions;        // Local/world space positions
-            StructuredBuffer<float4> _SH;               // SH0 colors (rgb) + opacity (a)
-            StructuredBuffer<float> _SHRest;            // SH rest coefficients (float array)
-            StructuredBuffer<float4> _Rotations;        // Rotations as quaternions (x,y,z,w) - Unity format
-            StructuredBuffer<float3> _Scales;           // Scale factors (already exp() applied in import)
-            StructuredBuffer<uint> _SortedIndices;      // Sorted splat indices (from GPU sort)
+            // ============================================================================
+            // SplatViewData structure - must match compute shader definition
+            // Precomputed per-splat rendering data for efficient quad expansion
+            // ============================================================================
+            struct SplatViewData
+            {
+                float4 pos;             // Clip-space position
+                float2 axis1;           // First ellipse axis (in pixels, includes scale)
+                float2 axis2;           // Second ellipse axis (in pixels, includes scale)  
+                uint2 color;            // Packed FP16 color: x = (r << 16) | g, y = (b << 16) | a
+            };
+
+            // Precomputed splat view data buffer (from compute shader)
+            StructuredBuffer<SplatViewData> _SplatViewData;
+            
+            // Sorted order buffer - maps instance ID to original splat index
+            StructuredBuffer<uint> _OrderBuffer;
             
             // Uniforms
-            float3 _ModelPosition;          // Model position offset
-            float4 _ModelRotation;          // Model rotation quaternion (x,y,z,w)
-            float3 _ModelScale;             // Model scale
-            float _SplatSize;               // Global scale multiplier
-            int _SplatCount;                // Total number of splats
-            int _UseSortedIndices;          // Whether to use sorted indices
-            int _SHRestCount;               // Number of SH rest floats per splat (3 * (bands^2 - 1))
-            int _SHBands;                   // Number of SH bands (0-3)
-            float3 _CameraWorldPos;         // Camera world position for view-dependent SH
-
-            struct Attributes
-            {
-                uint vertexID : SV_VertexID;
-            };
+            int _SplatCount;            // Total number of splats
 
             struct Varyings
             {
                 float4 positionCS : SV_POSITION;
-                float4 color : COLOR;           // rgb = SH DC color or view-dependent color, a = opacity
-                float2 uv : TEXCOORD0;          // UV for Gaussian falloff (-1 to 1 in ellipse space)
-                nointerpolation float3 worldPos : TEXCOORD1;    // Splat world position for view-dependent SH
-                nointerpolation uint splatIndex : TEXCOORD2;    // Splat index for SH lookup
-                nointerpolation uint sortedIndex : TEXCOORD3;   // Sorted index for debug coloring
+                half4 color : COLOR0;           // Unpacked color (rgb + alpha)
+                float2 uv : TEXCOORD0;          // UV for Gaussian falloff
             };
 
-
-
-            Varyings Vert(Attributes input)
+            Varyings Vert(uint vertexID : SV_VertexID, uint instanceID : SV_InstanceID)
             {
-                Varyings output;
-                output.positionCS = float4(0, 0, 2, 1);  // Default: behind far plane (culled)
-                output.color = float4(0, 0, 0, 0);
-                output.uv = float2(0, 0);
-                output.worldPos = float3(0, 0, 0);
-                output.splatIndex = 0;
-                output.sortedIndex = 0;
-
-                // Decode vertex: 6 vertices per splat (2 triangles forming a quad)
-                uint sortedIndex = input.vertexID / 6;
-                uint cornerIndex = input.vertexID % 6;
-
+                Varyings output = (Varyings)0;
+                
+                // instanceID is in render order (0 = first to render = farthest)
+                // vertexID is 0-5 for the 6 vertices of the quad (2 triangles)
+                
                 // Bounds check
-                if (sortedIndex >= (uint)_SplatCount)
-                    return output;
-
-                // Get actual splat index (sorted or unsorted)
-                uint splatIndex = sortedIndex;
-                
-                if (_UseSortedIndices != 0)
+                if (instanceID >= (uint)_SplatCount)
                 {
-                    splatIndex = _SortedIndices[sortedIndex];
+                    output.positionCS = asfloat(0x7fc00000);  // NaN discards primitive
+                    return output;
                 }
-
+                
+                // Look up the original splat index from sorted order
+                uint splatIdx = _OrderBuffer[instanceID];
+                
+                // Fetch precomputed view data for this splat
+                SplatViewData view = _SplatViewData[splatIdx];
+                float4 centerClipPos = view.pos;
+                
+                // Cull if behind camera or marked as culled (w <= 0)
+                if (centerClipPos.w <= 0)
+                {
+                    output.positionCS = asfloat(0x7fc00000);  // NaN discards primitive
+                    return output;
+                }
+                
+                // Unpack FP16 color
+                output.color.r = f16tof32(view.color.x >> 16);
+                output.color.g = f16tof32(view.color.x);
+                output.color.b = f16tof32(view.color.y >> 16);
+                output.color.a = f16tof32(view.color.y);
+                
                 // Quad corners for 2 triangles (CCW winding)
+                // Triangle 1: 0,1,2  Triangle 2: 3,4,5
                 static const float2 quadCorners[6] = {
-                    float2(-1, -1), float2(1, -1), float2(1, 1),
-                    float2(-1, -1), float2(1, 1), float2(-1, 1)
+                    float2(-1, -1), float2(1, -1), float2(1, 1),   // First triangle
+                    float2(-1, -1), float2(1, 1), float2(-1, 1)    // Second triangle
                 };
-
-                // Fetch splat data
-                float3 localPos = _Positions[splatIndex];
-                float4 localQuat = _Rotations[splatIndex];
-                float3 localScale = _Scales[splatIndex];
-                float4 shColor = _SH[splatIndex];
-
-                // Clip quad size by alpha (reduces foggy tails from low-opacity splats)
-                float alpha0 = shColor.a;
-                if (alpha0 < 1.0 / 255.0)
-                    return output;
-
-                // Compute clipping factor based on alpha
-                float clip = min(1.0, sqrt(-log((1.0 / 255.0) / max(alpha0, 1e-6))) * 0.5);
-                float2 corner = quadCorners[cornerIndex] * clip;
-
-                // Apply model transform
-                float3 worldPos = TransformPosition(localPos, _ModelPosition, _ModelRotation, _ModelScale);
-                float4 worldQuat = TransformRotation(localQuat, _ModelRotation);
-                float3 worldScale = localScale * _ModelScale * _SplatSize;
-
-                // Transform to view space
-                float4 viewPos4 = mul(UNITY_MATRIX_V, float4(worldPos, 1.0));
-                float3 viewPos = viewPos4.xyz;
                 
-                // Cull if behind camera (view space z should be negative)
-                if (viewPos.z >= -0.1)
-                   return output;
-
-                // Compute 3D covariance in world space
-                float3 covA, covB;
-                ComputeCovariance3D(worldQuat, worldScale, covA, covB);
-
-                // Get focal length from projection matrix
-                float focal = UNITY_MATRIX_P[0][0] * _ScreenParams.x * 0.5;
-
-                // Extract view rotation
-                float3x3 viewRotation = (float3x3)UNITY_MATRIX_V;
-
-                // Project to 2D covariance
-                //float3 cov2D = ProjectCovariance(covA, covB, viewPos, focal, viewRotation, UNITY_MATRIX_P);
-                float3 cov2D = CalcCovariance2D(worldPos, covA, covB, UNITY_MATRIX_MV, UNITY_MATRIX_P, _ScreenParams);
-
-                // Compute ellipse axes
-                float2 axis1, axis2;
-                float radius1, radius2;
-                ComputeEllipseAxes(cov2D, axis1, axis2, radius1, radius2);
-                //float2 axis1 = ellipse.xy;
-                //float2 axis2 = float2(-axis1.y, axis1.x);
-                //float radius1 = ellipse.z;
-                //float radius2 = ellipse.w;
-
-                // Skip if too small (< 1 pixel)
-                if (radius1 < 1.0 || radius2 < 1.0)
-                    return output;
-                    
-                // Limit maximum size
-                float maxRadius = min(2048.0, min(_ScreenParams.x, _ScreenParams.y));
-                radius1 = min(radius1, maxRadius);
-                radius2 = min(radius2, maxRadius);
-
-                // Compute screen-space offset
-                float2 screenOffset = corner.x * axis1 + corner.y * axis2;
-
-                // Project center to clip space
-                float4 centerClip = mul(UNITY_MATRIX_P, viewPos4);
+                float2 quadPos = quadCorners[vertexID];
                 
-                // Convert offset from pixels to clip space
-                float2 clipOffset = screenOffset * 2.0 * centerClip.w / _ScreenParams.xy;
-
-                // Final clip position
-                output.positionCS = centerClip + float4(clipOffset, 0, 0);
-
-                // UV for fragment shader
-                output.uv = corner;
+                // Scale quad by 2x to cover full Gaussian extent
+                // (axis already includes sqrt(2*lambda))
+                quadPos *= 2.0;
                 
-                // Pass world position and splat index for fragment shader SH evaluation
-                output.worldPos = worldPos;
-                output.splatIndex = splatIndex;
-                output.sortedIndex = sortedIndex;
-
-                // Compute view direction in world space (from splat to camera)
-                float3 viewDir = normalize(_CameraWorldPos - worldPos);
+                // Store UV for fragment shader Gaussian evaluation
+                output.uv = quadPos;
                 
-                // Evaluate spherical harmonics for view-dependent color
-                // Uses SH bands based on available data
-                float3 rgb;
-                if (_SHBands > 0 && _SHRestCount > 0)
-                {
-                    // Full SH evaluation with higher bands
-                    rgb = EvaluateSH(shColor.rgb, _SHRest, _SHRestCount, splatIndex, viewDir, _SHBands);
-                }
-                else
-                {
-                    // DC only (band 0)
-                    rgb = SHToColor(shColor.rgb);
-                }
+                // Compute screen-space offset using precomputed ellipse axes
+                // Axes are in pixels, convert to normalized device coordinates
+                float2 deltaScreenPos = (quadPos.x * view.axis1 + quadPos.y * view.axis2) * 2.0 / _ScreenParams.xy;
                 
-                // Convert from gamma (sRGB) to linear color space if Unity is in linear mode
-                // Gaussian splat colors from SH are stored/computed in sRGB space
-                #ifndef UNITY_COLORSPACE_GAMMA
-                    rgb = GammaToLinear(rgb);
-                #endif
+                // Final clip position = center + offset * w (perspective-correct)
+                output.positionCS = centerClipPos;
+                output.positionCS.xy += deltaScreenPos * centerClipPos.w;
                 
-                output.color = float4(rgb, shColor.a);
-
                 return output;
             }
 
             half4 Frag(Varyings input) : SV_Target
             {   
-                // Compute squared distance from center in ellipse space
-                // UV spans [-1, 1] representing 3 standard deviations
-                float r2 = dot(input.uv, input.uv);
+                // Gaussian falloff: exp(-r^2) where r^2 = dot(uv, uv)
+                // UV range is [-2, 2] so effective sigma coverage is good
+                float power = -dot(input.uv, input.uv);
+                half alpha = exp(power);
                 
-                // Discard pixels outside the ellipse (beyond 3 sigma)
-                if (r2 > 1.0)
-                    discard;
-
-                // Gaussian Falloff: exp(-A * r^2) with A=1
-                float gaussian = exp(- r2);
-                float alpha = saturate(gaussian * input.color.a);
-
-                // Discard nearly transparent pixels
+                // Apply splat opacity from precomputed color
+                alpha = saturate(alpha * input.color.a);
+                
+                // Discard nearly transparent pixels (reduces overdraw)
                 if (alpha < 1.0 / 255.0)
                     discard;
 
-                // Output premultiplied alpha
+                // Output premultiplied alpha for correct compositing
                 return half4(input.color.rgb * alpha, alpha);
 
                 // Debug: red color by sorted index

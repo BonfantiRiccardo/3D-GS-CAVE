@@ -180,6 +180,8 @@ namespace GaussianSplatting
                 public Vector4 screenParams;
                 public float nearPlane;
                 public float farPlane;
+                public float splatSize;             // Global splat scale for CalcSplatViewData
+                public Vector3 cameraWorldPos;      // Camera position for view-dependent SH
                 public GSComponent[] components;
                 public bool needsSort;  // Whether sorting is actually needed this frame
             }
@@ -187,6 +189,7 @@ namespace GaussianSplatting
             private static int kernelInitSortBuffers = -1;
             private static int kernelCalcViewData = -1;
             private static int kernelCalcSortKeys = -1;
+            private static int kernelCalcSplatViewData = -1;
             private static int kernelInitRadix = -1;
             private static int kernelUpsweep = -1;
             private static int kernelScan = -1;
@@ -204,6 +207,7 @@ namespace GaussianSplatting
                 kernelInitSortBuffers = shader.FindKernel("InitSortBuffers");
                 kernelCalcViewData = shader.FindKernel("CalcViewData");
                 kernelCalcSortKeys = shader.FindKernel("CalcSortKeys");
+                kernelCalcSplatViewData = shader.FindKernel("CalcSplatViewData");
                 kernelInitRadix = shader.FindKernel("InitDeviceRadixSort");
                 kernelUpsweep = shader.FindKernel("Upsweep");
                 kernelScan = shader.FindKernel("Scan");
@@ -219,12 +223,6 @@ namespace GaussianSplatting
             private static void ExecuteSortPass(SortPassData data, ComputeGraphContext context)
             {
                 if (data.sortingShader == null || data.components == null || data.components.Length == 0)
-                {
-                    return;
-                }
-                
-                // Skip sorting if camera hasn't moved
-                if (!data.needsSort)
                 {
                     return;
                 }
@@ -263,38 +261,64 @@ namespace GaussianSplatting
                     context.cmd.SetComputeVectorParam(data.sortingShader, "_ModelRotation", new Vector4(sortRot.x, sortRot.y, sortRot.z, sortRot.w));
                     context.cmd.SetComputeVectorParam(data.sortingShader, "_ModelScale", component.modelScale);
 
-                    // Init sort buffers
-                    resources.BindSortInputs(context.cmd, data.sortingShader, kernelInitSortBuffers);
-                    component.BindToCompute(context.cmd, data.sortingShader, kernelInitSortBuffers);
-                    context.cmd.DispatchCompute(data.sortingShader, kernelInitSortBuffers, groups, 1, 1);
-
-                    // View data
-                    resources.BindSortInputs(context.cmd, data.sortingShader, kernelCalcViewData);
-                    component.BindToCompute(context.cmd, data.sortingShader, kernelCalcViewData);
-                    context.cmd.DispatchCompute(data.sortingShader, kernelCalcViewData, groups, 1, 1);
-
-                    // Sort keys
-                    resources.BindSortInputs(context.cmd, data.sortingShader, kernelCalcSortKeys);
-                    context.cmd.DispatchCompute(data.sortingShader, kernelCalcSortKeys, groups, 1, 1);
-
-                    // Radix sort (4 passes)
-                    context.cmd.SetComputeIntParam(data.sortingShader, "e_numKeys", splatCount);
-                    context.cmd.SetComputeIntParam(data.sortingShader, "e_threadBlocks", resources.ThreadBlocks);
-
-                    for (int pass = 0; pass < 4; pass++)
+                    // Only run sorting passes if camera has moved
+                    if (data.needsSort)
                     {
-                        bool useAltAsSource = (pass % 2) == 1;
-                        resources.BindRadixSortBuffers(context.cmd, data.sortingShader, kernelInitRadix, useAltAsSource);
-                        resources.BindRadixSortBuffers(context.cmd, data.sortingShader, kernelUpsweep, useAltAsSource);
-                        resources.BindRadixSortBuffers(context.cmd, data.sortingShader, kernelScan, useAltAsSource);
-                        resources.BindRadixSortBuffers(context.cmd, data.sortingShader, kernelDownsweep, useAltAsSource);
+                        // Init sort buffers
+                        resources.BindSortInputs(context.cmd, data.sortingShader, kernelInitSortBuffers);
+                        component.BindToCompute(context.cmd, data.sortingShader, kernelInitSortBuffers);
+                        context.cmd.DispatchCompute(data.sortingShader, kernelInitSortBuffers, groups, 1, 1);
 
-                        context.cmd.SetComputeIntParam(data.sortingShader, "e_radixShift", pass * 8);
-                        context.cmd.DispatchCompute(data.sortingShader, kernelInitRadix, 1, 1, 1);
-                        context.cmd.DispatchCompute(data.sortingShader, kernelUpsweep, resources.ThreadBlocks, 1, 1);
-                        context.cmd.DispatchCompute(data.sortingShader, kernelScan, RadixBins, 1, 1);
-                        context.cmd.DispatchCompute(data.sortingShader, kernelDownsweep, resources.ThreadBlocks, 1, 1);
+                        // View data
+                        resources.BindSortInputs(context.cmd, data.sortingShader, kernelCalcViewData);
+                        component.BindToCompute(context.cmd, data.sortingShader, kernelCalcViewData);
+                        context.cmd.DispatchCompute(data.sortingShader, kernelCalcViewData, groups, 1, 1);
+
+                        // Sort keys
+                        resources.BindSortInputs(context.cmd, data.sortingShader, kernelCalcSortKeys);
+                        context.cmd.DispatchCompute(data.sortingShader, kernelCalcSortKeys, groups, 1, 1);
+
+                        // Radix sort (4 passes)
+                        context.cmd.SetComputeIntParam(data.sortingShader, "e_numKeys", splatCount);
+                        context.cmd.SetComputeIntParam(data.sortingShader, "e_threadBlocks", resources.ThreadBlocks);
+
+                        for (int pass = 0; pass < 4; pass++)
+                        {
+                            bool useAltAsSource = (pass % 2) == 1;
+                            resources.BindRadixSortBuffers(context.cmd, data.sortingShader, kernelInitRadix, useAltAsSource);
+                            resources.BindRadixSortBuffers(context.cmd, data.sortingShader, kernelUpsweep, useAltAsSource);
+                            resources.BindRadixSortBuffers(context.cmd, data.sortingShader, kernelScan, useAltAsSource);
+                            resources.BindRadixSortBuffers(context.cmd, data.sortingShader, kernelDownsweep, useAltAsSource);
+
+                            context.cmd.SetComputeIntParam(data.sortingShader, "e_radixShift", pass * 8);
+                            context.cmd.DispatchCompute(data.sortingShader, kernelInitRadix, 1, 1, 1);
+                            context.cmd.DispatchCompute(data.sortingShader, kernelUpsweep, resources.ThreadBlocks, 1, 1);
+                            context.cmd.DispatchCompute(data.sortingShader, kernelScan, RadixBins, 1, 1);
+                            context.cmd.DispatchCompute(data.sortingShader, kernelDownsweep, resources.ThreadBlocks, 1, 1);
+                        }
                     }
+                    
+                    // Compute per-splat view data (clip pos, ellipse axes, color)
+                    // Also precomputes all expensive per-splat data so vertex shader only does quad expansion
+                    context.cmd.SetComputeVectorParam(data.sortingShader, "_VecScreenParams", data.screenParams);
+                    context.cmd.SetComputeFloatParam(data.sortingShader, "_SplatScale", data.splatSize);
+                    context.cmd.SetComputeVectorParam(data.sortingShader, "_CameraWorldPos", data.cameraWorldPos);
+                    context.cmd.SetComputeIntParam(data.sortingShader, "_SHBands", component.ShBandsNumber);
+                    context.cmd.SetComputeIntParam(data.sortingShader, "_SHRestCount", component.gsAsset != null ? component.gsAsset.SHRestCount : 0);
+                    
+                    // Compute combined model-view matrix
+                    Matrix4x4 matrixMV = data.viewMatrix; // Model is identity since we apply model transform in shader
+                    context.cmd.SetComputeMatrixParam(data.sortingShader, "_MatrixMV", matrixMV);
+                    
+                    // Bind SH buffers for view-dependent color
+                    component.BindToCompute(context.cmd, data.sortingShader, kernelCalcSplatViewData);
+                    if (component.SHBuffer != null)
+                        context.cmd.SetComputeBufferParam(data.sortingShader, kernelCalcSplatViewData, "_SH", component.SHBuffer);
+                    if (component.SHRestBuffer != null)
+                        context.cmd.SetComputeBufferParam(data.sortingShader, kernelCalcSplatViewData, "_SHRest", component.SHRestBuffer);
+                    
+                    resources.BindSplatViewDataOutput(context.cmd, data.sortingShader, kernelCalcSplatViewData);
+                    context.cmd.DispatchCompute(data.sortingShader, kernelCalcSplatViewData, groups, 1, 1);
                 }
             }
 
@@ -307,11 +331,8 @@ namespace GaussianSplatting
                     return;
                 }
 
-                data.material.SetMatrix("_MatrixV", data.viewMatrix);
-                data.material.SetMatrix("_MatrixP", data.projMatrix);
+                // Set common uniforms (these are still needed for any fallback/debug rendering)
                 data.material.SetFloat("_SplatSize", data.splatSize);
-                
-                // Set camera world position for view-dependent spherical harmonics
                 data.material.SetVector("_CameraWorldPos", data.cameraWorldPos);
 
                 for (int i = 0; i < data.components.Length; i++)
@@ -322,23 +343,27 @@ namespace GaussianSplatting
                         continue;
                     }
 
-                    // Set model transform uniforms
-                    data.material.SetVector("_ModelPosition", component.modelPosition);
-                    Quaternion rot = component.ModelRotation;
-                    data.material.SetVector("_ModelRotation", new Vector4(rot.x, rot.y, rot.z, rot.w));
-                    data.material.SetVector("_ModelScale", component.modelScale);
+                    var resources = component.SortingResources;
+                    if (resources == null || !resources.IsInitialized)
+                    {
+                        continue;
+                    }
                     
-                    // Set SH bands count for view-dependent color computation
-                    data.material.SetInt("_SHBands", component.ShBandsNumber);
+                    // Bind precomputed SplatViewData buffer for efficient rendering
+                    data.material.SetBuffer("_SplatViewData", resources.GetSplatViewData());
+                    data.material.SetBuffer("_OrderBuffer", resources.SortIndices);
+                    data.material.SetInt("_SplatCount", component.ActiveSplatCount);
 
-                    component.BindTo(data.material);
+                    // Draw using triangle strip quads: 4 vertices per splat instance
+                    // SV_InstanceID provides the sorted splat index
+                    // SV_VertexID % 4 provides the quad corner (0-3)
                     context.cmd.DrawProcedural(
                         Matrix4x4.identity,
                         data.material,
                         0,
                         MeshTopology.Triangles,
-                        component.ActiveSplatCount * 6,
-                        1);
+                        6,                              // 6 vertices per quad (2 triangles, using DrawProcedural)
+                        component.ActiveSplatCount);    // One instance per splat
                 }
             }
 
@@ -388,6 +413,8 @@ namespace GaussianSplatting
                             1.0f / Mathf.Max(1, cameraData.camera.pixelWidth), 1.0f / Mathf.Max(1, cameraData.camera.pixelHeight));
                         sortPassData.nearPlane = cameraData.camera.nearClipPlane;
                         sortPassData.farPlane = cameraData.camera.farClipPlane;
+                        sortPassData.splatSize = settings.splatSize;
+                        sortPassData.cameraWorldPos = cameraData.camera.transform.position;
                         
                         // Check if camera has moved and sorting is needed
                         sortPassData.needsSort = CameraHasMoved(cameraData.camera);

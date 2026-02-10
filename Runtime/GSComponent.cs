@@ -13,21 +13,12 @@ namespace GaussianSplatting
         [Header("Quality Settings")]
         public GSAsset gsAsset;            // Reference to the GSAsset containing splat data
         public int maxSplats = 100000000;  //100 million by default
+                
+        // Gets the model position, rotation and scale from the GameObject's Transform
+        public Vector3 modelPosition => transform.position;
+        public Quaternion ModelRotation => transform.rotation;
+        public Vector3 modelScale => transform.lossyScale;
         
-        [Header("Model Transform")]
-        [Tooltip("Position offset for the splat model")]
-        public Vector3 modelPosition = Vector3.zero;
-        
-        [Tooltip("Rotation of the splat model (Euler angles)")]
-        public Vector3 modelRotationEuler = Vector3.zero;
-        
-        [Tooltip("Scale of the splat model")]
-        public Vector3 modelScale = Vector3.one;
-        
-        /// <summary>
-        /// Gets the model rotation as a quaternion
-        /// </summary>
-        public Quaternion ModelRotation => Quaternion.Euler(modelRotationEuler);
         public int ActiveSplatCount => gsAsset == null ? 0 : Mathf.Min(gsAsset.splatCount, maxSplats);
         public int ShBandsNumber
         {
@@ -284,17 +275,6 @@ namespace GaussianSplatting
             if (gsAsset != null)
             {
                 material.SetInt("_SplatCount", Mathf.Min(gsAsset.splatCount, maxSplats));
-            }
-
-            // Bind sorting indices buffer if available (for sorted rendering)
-            if (sortingResources != null && sortingResources.IsInitialized)
-            {
-                material.SetBuffer("_SortedIndices", sortingResources.GetSortedIndices());
-                material.SetInt("_UseSortedIndices", 1);
-            }
-            else
-            {
-                material.SetInt("_UseSortedIndices", 0);
             }
         }
 
