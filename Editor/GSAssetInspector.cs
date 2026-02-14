@@ -23,13 +23,19 @@ namespace GaussianSplatting.Editor
             using (new EditorGUI.DisabledScope(true))
             {
                 EditorGUILayout.IntField("Splat Count", asset.splatCount);
-                EditorGUILayout.IntField("Position Count", asset.Positions != null ? asset.Positions.Length : -1);
-                EditorGUILayout.IntField("Rotation Count", asset.Rotations != null ? asset.Rotations.Length : -1);
-                EditorGUILayout.IntField("Scale Count", asset.Scales != null ? asset.Scales.Length : -1);
-                EditorGUILayout.IntField("SH Rest Count", asset.SHRestCount);
-                EditorGUILayout.IntField("SH Rest Total", asset.SHRestCount > 0 ? asset.splatCount * asset.SHRestCount : 0);
-                EditorGUILayout.IntField("SH DC Count", asset.SH != null ? asset.SH.Length : -1);
-                EditorGUILayout.IntField("SH Rest Array Length", asset.SHRest != null ? asset.SHRest.Length : -1);
+                // Use byte[] lengths divided by element stride to avoid reconstructing typed arrays
+                EditorGUILayout.IntField("Position Data", asset.PositionData != null ? asset.PositionData.Length / 12 : 0);
+                EditorGUILayout.IntField("Rotation Data", asset.RotationData != null ? asset.RotationData.Length / 16 : 0);
+                EditorGUILayout.IntField("Scale Data", asset.ScaleData != null ? asset.ScaleData.Length / 12 : 0);
+                EditorGUILayout.IntField("SH DC Data", asset.SHData != null ? asset.SHData.Length / 16 : 0);
+                EditorGUILayout.IntField("SH Rest Count/Splat", asset.SHRestCount);
+                EditorGUILayout.IntField("SH Rest Total", asset.SHRestData != null ? asset.SHRestData.Length / 4 : 0);
+                
+                // Estimate total asset memory in MB
+                long totalBytes = (asset.PositionData?.Length ?? 0) + (asset.RotationData?.Length ?? 0) +
+                                  (asset.ScaleData?.Length ?? 0) + (asset.SHData?.Length ?? 0) +
+                                  (asset.SHRestData?.Length ?? 0);
+                EditorGUILayout.TextField("Total Data", $"{totalBytes / (1024.0 * 1024.0):F1} MB");
             }
 
             EditorGUILayout.Space();

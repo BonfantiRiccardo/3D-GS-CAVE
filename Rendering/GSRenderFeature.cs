@@ -85,7 +85,8 @@ namespace GaussianSplatting
 
             public bool enabled = true;     //Specifies if the render feature is enabled
             //Event to inject the render pass
-            public RenderPassEvent renderPassEvent = RenderPassEvent.AfterRenderingTransparents;
+            public RenderPassEvent renderPassEvent = RenderPassEvent.BeforeRenderingTransparents; 
+            //public RenderPassEvent renderPassEvent = RenderPassEvent.AfterRenderingTransparents;
             public Material splatMaterial;      //Material used for rendering splats
             public float splatSize = 1.0f;    //Global scale multiplier for per-splat size
             
@@ -335,35 +336,34 @@ namespace GaussianSplatting
                 data.material.SetFloat("_SplatSize", data.splatSize);
                 data.material.SetVector("_CameraWorldPos", data.cameraWorldPos);
 
+                var mpb = new MaterialPropertyBlock();
+
+
                 for (int i = 0; i < data.components.Length; i++)
                 {
                     GSComponent component = data.components[i];
                     if (component == null || !component.HasBuffers || component.ActiveSplatCount <= 0)
-                    {
                         continue;
-                    }
 
                     var resources = component.SortingResources;
                     if (resources == null || !resources.IsInitialized)
-                    {
                         continue;
-                    }
-                    
-                    // Bind precomputed SplatViewData buffer for efficient rendering
-                    data.material.SetBuffer("_SplatViewData", resources.GetSplatViewData());
-                    data.material.SetBuffer("_OrderBuffer", resources.SortIndices);
-                    data.material.SetInt("_SplatCount", component.ActiveSplatCount);
 
-                    // Draw using triangle strip quads: 4 vertices per splat instance
-                    // SV_InstanceID provides the sorted splat index
-                    // SV_VertexID % 4 provides the quad corner (0-3)
+                    // MaterialPropertyBlock binds per-component buffers without modifying the
+                    // shared material, allowing multiple splat objects to coexist.
+                    mpb.Clear();
+                    mpb.SetBuffer("_SplatViewData", resources.GetSplatViewData());
+                    mpb.SetBuffer("_OrderBuffer", resources.SortIndices);
+                    mpb.SetInteger("_SplatCount", component.ActiveSplatCount);
+
                     context.cmd.DrawProcedural(
                         Matrix4x4.identity,
                         data.material,
                         0,
                         MeshTopology.Triangles,
-                        6,                              // 6 vertices per quad (2 triangles, using DrawProcedural)
-                        component.ActiveSplatCount);    // One instance per splat
+                        6,
+                        component.ActiveSplatCount,
+                        mpb);
                 }
             }
 
@@ -395,9 +395,12 @@ namespace GaussianSplatting
                 const string sortPassName = "Gaussian Splat Sort";
                 const string passName = "Gaussian Splat Pass";
 
-                // Use GPU projection matrix to match Unity's rendering pipeline
+                // Build GPU projection matrix
+                // GetProjectionMatrix() already contains camera jitter in URP.
+                // renderIntoTexture must match current active target to get correct Y-flip behavior.
                 Matrix4x4 viewMatrix = cameraData.GetViewMatrix();
-                Matrix4x4 projMatrix = GL.GetGPUProjectionMatrix(cameraData.camera.projectionMatrix, false);
+                bool renderIntoTexture = !resourceData.isActiveTargetBackBuffer;
+                Matrix4x4 projMatrix = GL.GetGPUProjectionMatrix(cameraData.GetProjectionMatrix(), renderIntoTexture);
 
                 // Sorting pass - always enabled as GS requires back-to-front rendering
                 if (settings.sortingShader != null)
@@ -441,10 +444,12 @@ namespace GaussianSplatting
                     // Eg:
                     // builder.UseTexture(sourceTexture);
                     // TextureHandle destination = UniversalRenderer.CreateRenderGraphTexture(renderGraph, cameraData.cameraTargetDescriptor, "Destination Texture", false);
+                    // Prevent RenderGraph from culling this pass (splats must always render when components exist)
+                    builder.AllowPassCulling(false);
 
                     // This sets the render target of the pass to the active color texture. Change it to your own render target as needed.
                     builder.SetRenderAttachment(resourceData.activeColorTexture, 0);
-
+                    builder.SetRenderAttachmentDepth(resourceData.activeDepthTexture);
 
                     passData.material = settings.splatMaterial;
                     passData.splatSize = settings.splatSize;

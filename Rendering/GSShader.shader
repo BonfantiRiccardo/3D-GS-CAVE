@@ -31,10 +31,8 @@ Shader "GaussianSplatting/GSShader"
 
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
 
-            // ============================================================================
             // SplatViewData structure - must match compute shader definition
             // Precomputed per-splat rendering data for efficient quad expansion
-            // ============================================================================
             struct SplatViewData
             {
                 float4 pos;             // Clip-space position

@@ -1,3 +1,6 @@
+using System;
+using System.IO;
+using UnityEditor;
 using UnityEditor.AssetImporters;
 using UnityEngine;
 
@@ -5,38 +8,111 @@ namespace GaussianSplatting.Editor
 {
     /// <summary>
     /// PLYImporter is responsible for importing PLY files as GSAsset ScriptableObjects.
+    /// Uses the buffered AsyncPLYParser for high-performance import of large files.
     /// </summary>
-    [ScriptedImporter(1, "ply")]
+    [ScriptedImporter(2, "ply")]
     public class PLYImporter : ScriptedImporter
     {
-        [Header("Parsing Options")]         // Specify import options in the inspector
-        [SerializeField] private bool importRotations = true;
-        [SerializeField] private bool importScales = true;
-        [SerializeField] private bool importSH = false;
-        [SerializeField] private RotationOrder rotationOrder = RotationOrder.WXYZ;
+        private sealed class ImportProgress : IProgress<float>, IDisposable
+        {
+            private readonly string _fileName;
+            private bool _disposed;
+
+            public ImportProgress(string fileName)
+            {
+                _fileName = fileName;
+            }
+
+            public void Report(float value)
+            {
+                if (_disposed || !CanShowProgressBar())
+                {
+                    return;
+                }
+
+                float clamped = Mathf.Clamp01(value);
+                EditorUtility.DisplayProgressBar(
+                    "Importing PLY",
+                    $"{_fileName} - {clamped * 100f:F0}%",
+                    clamped);
+            }
+
+            public void Dispose()
+            {
+                if (_disposed)
+                {
+                    return;
+                }
+
+                _disposed = true;
+                if (!CanShowProgressBar())
+                {
+                    return;
+                }
+
+                EditorUtility.ClearProgressBar();
+                EditorApplication.delayCall += EditorUtility.ClearProgressBar;
+            }
+        }
+
+        private static bool CanShowProgressBar()
+        {
+            if (Application.isBatchMode)
+            {
+                return false;
+            }
+
+#if UNITY_2021_2_OR_NEWER
+            if (AssetDatabase.IsAssetImportWorkerProcess())
+            {
+                return false;
+            }
+#endif
+
+            return true;
+        }
+
+        [InitializeOnLoadMethod]
+        private static void ClearStaleProgressBarAfterDomainReload()
+        {
+            if (!CanShowProgressBar())
+            {
+                return;
+            }
+
+            EditorApplication.delayCall += EditorUtility.ClearProgressBar;
+        }
 
         /// <summary>
-        /// Called when the asset is imported. Creates a GSAsset from the PLY file, using PLYParser and GSAssetBuilder.
+        /// Called when the asset is imported. Creates a GSAsset from the PLY file.
+        /// Uses AsyncPLYParser with buffered I/O and editor progress bar.
         /// </summary>
-        /// <param name="ctx">The context for the asset import.</param>
         public override void OnImportAsset(AssetImportContext ctx)
         {
-            var options = new PLYImportOptions
+            string fileName = Path.GetFileName(ctx.assetPath);
+            using var progress = new ImportProgress(fileName);
+            progress.Report(0f);
+
+            GSImportData data;
+            try
             {
-                ImportRotations = importRotations,
-                ImportScales = importScales,
-                ImportSH = importSH,
-                RotationOrder = rotationOrder
-            };
+                data = AsyncPLYParser.Parse(ctx.assetPath, progress);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"Buffered parser failed, falling back to legacy parser: {ex.Message}");
+                data = PLYParser.Parse(ctx.assetPath);
+            }
 
-            GSImportData data = PLYParser.Parse(ctx.assetPath, options);
             GSAsset asset = GSAssetBuilder.BuildAsset(data);
-            asset.name = System.IO.Path.GetFileNameWithoutExtension(ctx.assetPath);
+            asset.name = Path.GetFileNameWithoutExtension(ctx.assetPath);
 
-            Debug.Log($"PLY import: {ctx.assetPath} | ImportSH={options.ImportSH} | SHRestCount={data.SHRestCount} | SHRestLen={data.SHRest?.Length ?? 0} | SHDCLen={data.SH?.Length ?? 0}");
+            Debug.Log(
+                $"PLY import: {ctx.assetPath} | Splats={data.Positions?.Length ?? 0} | SHRestCount={data.SHRestCount} | SHRestLen={data.SHRest?.Length ?? 0}");
 
-            ctx.AddObjectToAsset("GSAsset", asset);         // Add the created asset to the import context
+            ctx.AddObjectToAsset("GSAsset", asset);
             ctx.SetMainObject(asset);
+            progress.Report(1f);
         }
     }
 }

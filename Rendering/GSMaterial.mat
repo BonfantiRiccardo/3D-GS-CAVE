@@ -28,6 +28,7 @@ Material:
     m_Floats:
     - _DebugMode: 0
     - _SplatSize: 1
+    - _ZTest: 7
     m_Colors: []
   m_BuildTextureStacks: []
   m_AllowLocking: 1

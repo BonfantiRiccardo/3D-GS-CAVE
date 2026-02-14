@@ -20,18 +20,31 @@ namespace GaussianSplatting
         public Vector3 modelScale => transform.lossyScale;
         
         public int ActiveSplatCount => gsAsset == null ? 0 : Mathf.Min(gsAsset.splatCount, maxSplats);
+        /// <summary>
+        /// Number of SH bands in the asset. Computed from SHRestCount metadata to avoid
+        /// triggering lazy typed-array reconstruction of SH/SHRest byte blobs.
+        /// rest count = 3 * (bands^2 - 1), so bands = sqrt(restCount/3 + 1).
+        /// </summary>
         public int ShBandsNumber
         {
-            get         
-            {       // Gets the number of SH bands used in the asset
-                if (gsAsset == null || gsAsset.SH == null || gsAsset.SH.Length == 0 || gsAsset.SHRest == null || gsAsset.SHRest.Length == 0 || gsAsset.SHRestCount == 0)
-                {
+            get
+            {
+                if (gsAsset == null || gsAsset.SHRestCount == 0)
                     return 0;
-                }
-                // rest count = 3 * (bands^2 -1) because we store 3 color channels per coefficient and exclude the first band stored in sh (direct color)
-                return (int)Math.Sqrt( (gsAsset.SHRestCount / 3) + 1);
+                // Validate that DC (SH) blob exists via byte[] length, not typed array
+                if (gsAsset.SHData == null || gsAsset.SHData.Length == 0)
+                    return 0;
+                // Validate that rest blob exists via byte[] length (4 bytes per float)
+                if (gsAsset.SHRestData == null || gsAsset.SHRestData.Length < gsAsset.splatCount * gsAsset.SHRestCount * 4)
+                    return 0;
+                return (int)Math.Sqrt((gsAsset.SHRestCount / 3) + 1);
             }
         }
+
+        /// <summary>
+        /// True when all required GPU buffers are allocated. Uses byte[] metadata checks
+        /// to avoid triggering lazy typed-array allocation.
+        /// </summary>
         public bool HasBuffers => positionBuffer != null && rotationBuffer != null && scaleBuffer != null && (ShBandsNumber == 0 || shBuffer != null);
 
 
@@ -92,6 +105,7 @@ namespace GaussianSplatting
 
         /// <summary>
         /// Builds the compute buffers for positions, rotation, scale, and SH based on the GSAsset data.
+        /// Uses direct byte[] upload from GSAsset when possible to avoid reconstructing typed arrays.
         /// </summary>
         void BuildBuffers()
         {
@@ -108,23 +122,18 @@ namespace GaussianSplatting
                 return;
             }
 
-            if (gsAsset.Positions == null || gsAsset.Rotations == null || gsAsset.Scales == null) {
-                Debug.LogWarning("GSComponent: GSAsset data arrays are null.");
-                return;
-            }
-            if (gsAsset.Positions.Length < splatCount ||
-                gsAsset.Rotations.Length < splatCount ||
-                gsAsset.Scales.Length < splatCount)
+            // Validate using raw byte[] accessors (avoids triggering lazy typed-array reconstruction)
+            if (gsAsset.PositionData == null || gsAsset.RotationData == null || gsAsset.ScaleData == null)
             {
-                Debug.LogWarning("GSComponent: GSAsset data arrays are smaller than the splat count.");
+                Debug.LogWarning("GSComponent: GSAsset data arrays are null.");
                 return;
             }
 
             // Check if SH data exists (DC term for colors + opacity)
-            bool useSH = gsAsset.SH != null && gsAsset.SH.Length >= splatCount;
+            bool useSH = gsAsset.SHData != null && gsAsset.SHData.Length >= splatCount * 16;
             // Check if higher SH bands exist
-            bool useSHRest = ShBandsNumber > 1 && gsAsset.SHRest != null && gsAsset.SHRestCount > 0 &&
-                             gsAsset.SHRest.Length >= splatCount * gsAsset.SHRestCount;
+            bool useSHRest = gsAsset.SHRestCount > 0 && gsAsset.SHRestData != null &&
+                             gsAsset.SHRestData.Length >= splatCount * gsAsset.SHRestCount * 4;
 
             bool needsRebuild = positionBuffer == null || rotationBuffer == null || scaleBuffer == null ||
                                 positionBuffer.count != splatCount ||
@@ -153,16 +162,31 @@ namespace GaussianSplatting
                 shRestBuffer = new ComputeBuffer(splatCount, sizeof(float) * gsAsset.SHRestCount);
             }
 
-            positionBuffer.SetData(gsAsset.Positions, 0, 0, splatCount);
-            rotationBuffer.SetData(gsAsset.Rotations, 0, 0, splatCount);
-            scaleBuffer.SetData(gsAsset.Scales, 0, 0, splatCount);
-            if (useSH && shBuffer != null)
+            // Upload data to GPU. Use direct byte[] path when uploading the full dataset
+            // (avoids allocating typed arrays entirely). Falls back to typed arrays for partial uploads.
+            bool fullUpload = splatCount == gsAsset.splatCount;
+
+            if (fullUpload)
             {
-                shBuffer.SetData(gsAsset.SH, 0, 0, splatCount);
+                // Zero-copy path: byte[] → GPU. No typed array allocation.
+                positionBuffer.SetData(gsAsset.PositionData);
+                rotationBuffer.SetData(gsAsset.RotationData);
+                scaleBuffer.SetData(gsAsset.ScaleData);
+                if (useSH && shBuffer != null)
+                    shBuffer.SetData(gsAsset.SHData);
+                if (useSHRest && shRestBuffer != null)
+                    shRestBuffer.SetData(gsAsset.SHRestData);
             }
-            if (useSHRest && shRestBuffer != null)
+            else
             {
-                shRestBuffer.SetData(gsAsset.SHRest, 0, 0, splatCount * gsAsset.SHRestCount);
+                // Partial upload: typed arrays are reconstructed once and cached in GSAsset
+                positionBuffer.SetData(gsAsset.Positions, 0, 0, splatCount);
+                rotationBuffer.SetData(gsAsset.Rotations, 0, 0, splatCount);
+                scaleBuffer.SetData(gsAsset.Scales, 0, 0, splatCount);
+                if (useSH && shBuffer != null)
+                    shBuffer.SetData(gsAsset.SH, 0, 0, splatCount);
+                if (useSHRest && shRestBuffer != null)
+                    shRestBuffer.SetData(gsAsset.SHRest, 0, 0, splatCount * gsAsset.SHRestCount);
             }
         }
 

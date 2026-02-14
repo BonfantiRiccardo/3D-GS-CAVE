@@ -59,19 +59,18 @@ namespace GaussianSplatting.Editor
             public int RestCount;            //Number of f_rest_* coefficients
         }
 
-
         /// <summary>
-        /// Parses a PLY file at the given path with the specified import options.
+        /// Parses a PLY file at the given path. Always imports all data (rotations, scales, SH).
         /// </summary>
         /// <param name="path">The file path of the PLY file to parse.</param>
         /// <param name="options">The import options to use during parsing.</param>
         /// <returns>A GSImportData object containing the parsed data.</returns>
-        public static GSImportData Parse(string path, PLYImportOptions options)
+        public static GSImportData Parse(string path)
         {       // Open the file stream for reading
             using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
 
             PLYHeader header = ReadHeader(stream);
-            return ParseBinary(stream, header, options);
+            return ParseBinary(stream, header);
         }
 
         /// <summary>
@@ -177,9 +176,8 @@ namespace GaussianSplatting.Editor
         /// </summary>
         /// <param name="stream">The stream containing the binary PLY data.</param>
         /// <param name="header">The PLYHeader containing metadata about the file structure.</param>
-        /// <param name="options">The import options to use during parsing.</param>
         /// <returns>A GSImportData object containing the parsed data.</returns>
-        private static GSImportData ParseBinary(Stream stream, PLYHeader header, PLYImportOptions options)
+        private static GSImportData ParseBinary(Stream stream, PLYHeader header)
         {   //If the format is binary, we read the data using a BinaryReader
             bool littleEndian = header.Format == PLYFormat.BinaryLittleEndian;
 
@@ -195,7 +193,7 @@ namespace GaussianSplatting.Editor
             var rotations = new quaternion[header.VertexCount];
             var scales = new Vector3[header.VertexCount];
             var sh = new Vector4[header.VertexCount];  // Use Vector4 to preserve raw SH coefficients without clamping
-            float[] shRest = header.RestCount > 0 && options.ImportSH
+            float[] shRest = header.RestCount > 0
                 ? new float[header.VertexCount * header.RestCount]
                 : Array.Empty<float>();
 
@@ -238,7 +236,8 @@ namespace GaussianSplatting.Editor
                         case "f_dc_2" or "b" or "blue": sh2 = value; break;
                     }
 
-                    if (options.ImportSH && header.RestCount > 0)       //If importing SH rest coefficients, store them
+                    // Always capture SH rest coefficients
+                    if (header.RestCount > 0)
                     {
                         int restIndex = header.RestIndexMap[p];
                         if (restIndex >= 0)
@@ -252,48 +251,31 @@ namespace GaussianSplatting.Editor
                 min = Vector3.Min(min, positions[i]);
                 max = Vector3.Max(max, positions[i]);
 
-                if (options.ImportRotations)
+                // Rotation — always WXYZ (standard 3DGS: rot_0 = W)
+                quaternion q;
+                if (!float.IsNaN(rot0))
                 {
-                    quaternion q;
-                    if (!float.IsNaN(rot0))
-                    {
-                        // Standard 3DGS PLY files use rot_0/1/2/3 format
-                        q = options.RotationOrder == RotationOrder.WXYZ
-                            ? new quaternion(rot1, rot2, rot3, rot0)
-                            : new quaternion(rot0, rot1, rot2, rot3);
-                    }
-                    else
-                    {
-                        q = new quaternion(qx, qy, qz, qw);
-                    }
-                    // Normalize quaternion to ensure valid rotation
-                    rotations[i] = math.normalize(q);
+                    q = new quaternion(rot1, rot2, rot3, rot0); // WXYZ: rot_0=W, rot_1=X, rot_2=Y, rot_3=Z
                 }
                 else
                 {
-                    rotations[i] = quaternion.identity;
+                    q = new quaternion(qx, qy, qz, qw);
                 }
+                // Normalize quaternion to ensure valid rotation
+                rotations[i] = math.normalize(q);
 
-                if (options.ImportScales)
-                {
-                    if (float.IsNaN(s0) || float.IsNaN(s1) || float.IsNaN(s2))
-                    {
-                        scales[i] = Vector3.one;
-                    }
-                    else
-                    {
-                        // Standard 3DGS PLY files store scales as log-scale values
-                        // Apply exponential to convert to actual scale
-                        scales[i] = new Vector3(
-                            Mathf.Exp(s0),
-                            Mathf.Exp(s1),
-                            Mathf.Exp(s2)
-                        );
-                    }
-                }
-                else
+                // Scale — always apply exp transform
+                if (float.IsNaN(s0) || float.IsNaN(s1) || float.IsNaN(s2))
                 {
                     scales[i] = Vector3.one;
+                }
+                else
+                {
+                    scales[i] = new Vector3(
+                        Mathf.Exp(s0),
+                        Mathf.Exp(s1),
+                        Mathf.Exp(s2)
+                    );
                 }
 
                 // Standard 3DGS PLY files store opacity as logit (inverse sigmoid)
@@ -310,8 +292,8 @@ namespace GaussianSplatting.Editor
                 Rotations = rotations,
                 Scales = scales,
                 SH = sh,
-                SHRest = options.ImportSH ? shRest : Array.Empty<float>(),
-                SHRestCount = options.ImportSH ? header.RestCount : 0,
+                SHRest = shRest,
+                SHRestCount = header.RestCount,
                 Bounds = new Bounds((min + max) * 0.5f, max - min)
             };
         }

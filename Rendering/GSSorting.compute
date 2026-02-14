@@ -218,9 +218,11 @@ void CalcSplatViewData(uint3 id : SV_DispatchThreadID)
     float4 worldQuat = TransformRotation(localQuat, _ModelRotation);
     float3 worldScale = localScale * _ModelScale * _SplatScale;
     
-    // Transform to clip space
-    float4 viewPos4 = mul(UNITY_MATRIX_V, float4(worldPos, 1.0));
-    float4 clipPos = mul(UNITY_MATRIX_P, viewPos4);
+    // Transform to clip space.
+    // IMPORTANT: use explicit uniforms set from C# for compute dispatches.
+    // UNITY_MATRIX_V / UNITY_MATRIX_P are not guaranteed to be valid in compute kernels.
+    float4 viewPos4 = mul(_MatrixV, float4(worldPos, 1.0));
+    float4 clipPos = mul(_MatrixP, viewPos4);
     
     // Check if behind camera (cull)
     if (clipPos.w <= 0)
