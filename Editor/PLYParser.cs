@@ -251,7 +251,7 @@ namespace GaussianSplatting.Editor
                 min = Vector3.Min(min, positions[i]);
                 max = Vector3.Max(max, positions[i]);
 
-                // Rotation — always WXYZ (standard 3DGS: rot_0 = W)
+                // Rotation:  always WXYZ (standard 3DGS: rot_0 = W)
                 quaternion q;
                 if (!float.IsNaN(rot0))
                 {
@@ -264,7 +264,7 @@ namespace GaussianSplatting.Editor
                 // Normalize quaternion to ensure valid rotation
                 rotations[i] = math.normalize(q);
 
-                // Scale — always apply exp transform
+                // Scale: always apply exp transform
                 if (float.IsNaN(s0) || float.IsNaN(s1) || float.IsNaN(s2))
                 {
                     scales[i] = Vector3.one;

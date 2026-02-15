@@ -10,9 +10,23 @@ namespace GaussianSplatting.Editor
     /// PLYImporter is responsible for importing PLY files as GSAsset ScriptableObjects.
     /// Uses the buffered AsyncPLYParser for high-performance import of large files.
     /// </summary>
-    [ScriptedImporter(2, "ply")]
+    [ScriptedImporter(3, "ply")]
     public class PLYImporter : ScriptedImporter
     {
+        [SerializeField]
+        [Tooltip("Controls how many spherical harmonic (SH) coefficients are imported.\n" +
+                 "Full: All SH bands (highest quality, most memory)\n" +
+                 "Reduced: Band 1 only (good quality, less memory)\n" +
+                 "None: DC color only (fastest import, least memory)")]
+        private SHImportQuality m_SHQuality = SHImportQuality.Full;
+
+        [SerializeField]
+        [Tooltip("Coordinate system handedness flip applied during import.\n" +
+                 "None: No flip (data used as-is)\n" +
+                 "FlipZ: Negate Z axis (common for COLMAP / 3DGS right-hand → Unity left-hand)\n" +
+                 "FlipX: Negate X axis (alternative handedness conversion)")]
+        private CoordinateFlip m_CoordinateFlip = CoordinateFlip.FlipZ;
+
         private sealed class ImportProgress : IProgress<float>, IDisposable
         {
             private readonly string _fileName;
@@ -96,7 +110,7 @@ namespace GaussianSplatting.Editor
             GSImportData data;
             try
             {
-                data = AsyncPLYParser.Parse(ctx.assetPath, progress);
+                data = AsyncPLYParser.Parse(ctx.assetPath, progress, m_SHQuality, m_CoordinateFlip);
             }
             catch (Exception ex)
             {
@@ -108,7 +122,11 @@ namespace GaussianSplatting.Editor
             asset.name = Path.GetFileNameWithoutExtension(ctx.assetPath);
 
             Debug.Log(
-                $"PLY import: {ctx.assetPath} | Splats={data.Positions?.Length ?? 0} | SHRestCount={data.SHRestCount} | SHRestLen={data.SHRest?.Length ?? 0}");
+                $"PLY import: {ctx.assetPath} | Splats={data.Positions?.Length ?? 0} | " +
+                $"SH={data.ImportedSHQuality} | SHRestCount={data.SHRestCount} | " +
+                $"Flip={data.AppliedFlip} | " +
+                $"HasRot={data.HasRotations} | HasScale={data.HasScales} | " +
+                $"HasColor={data.HasColors} | HasOpacity={data.HasOpacity}");
 
             ctx.AddObjectToAsset("GSAsset", asset);
             ctx.SetMainObject(asset);

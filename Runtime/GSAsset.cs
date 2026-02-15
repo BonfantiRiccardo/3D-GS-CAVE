@@ -22,13 +22,13 @@ namespace GaussianSplatting
         [SerializeField, HideInInspector] private byte[] positionData;     // float3 per splat (12 bytes each)
         [SerializeField, HideInInspector] private byte[] rotationData;     // quaternion per splat (16 bytes each)
         [SerializeField, HideInInspector] private byte[] scaleData;        // float3 per splat (12 bytes each)
-        [SerializeField, HideInInspector] private byte[] shData;           // float4 per splat (16 bytes each) — DC(xyz) + opacity(w)
+        [SerializeField, HideInInspector] private byte[] shData;           // float4 per splat (16 bytes each): DC(xyz) + opacity(w)
         [SerializeField, HideInInspector] private byte[] shRestData;       // float per coeff (4 bytes each), total = splatCount * shRestCount
         [SerializeField, HideInInspector] private int shRestCount;         // number of SH rest coefficients per splat
         public int splatCount;                                              // Total number of splats
         public Bounds bounds;                                               // Axis-Aligned Bounding Box (AABB)
 
-        // Cached typed arrays — reconstructed on first access
+        // Cached typed arrays: reconstructed on first access
         [NonSerialized] private Vector3[] _positions;
         [NonSerialized] private quaternion[] _rotations;
         [NonSerialized] private Vector3[] _scales;
@@ -43,7 +43,7 @@ namespace GaussianSplatting
         public float[] SHRest => _shRest ??= ReinterpretArray<float>(shRestData);
         public int SHRestCount => shRestCount;
 
-        // Direct byte[] access for ComputeBuffer.SetData(byte[]) — zero-copy GPU upload
+        // Direct byte[] access for ComputeBuffer.SetData(byte[])         zero-copy GPU upload
         public byte[] PositionData => positionData;
         public byte[] RotationData => rotationData;
         public byte[] ScaleData => scaleData;

@@ -12,7 +12,7 @@ namespace GaussianSplatting
     {
         [Header("Quality Settings")]
         public GSAsset gsAsset;            // Reference to the GSAsset containing splat data
-        public int maxSplats = 100000000;  //100 million by default
+        public int maxSplats = 1000000000;  //1 billion by default
                 
         // Gets the model position, rotation and scale from the GameObject's Transform
         public Vector3 modelPosition => transform.position;
