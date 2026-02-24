@@ -49,77 +49,122 @@ Shader "GaussianSplatting/GSShader"
             
             // Uniforms
             int _SplatCount;            // Total number of splats
+            int _ShowSplatCenters;      // 1 = show debug center points, 0 = normal rendering
+            float _CenterPointSize;    // Size of center points in UV space
 
             struct Varyings
             {
                 float4 positionCS : SV_POSITION;
                 half4 color : COLOR0;           // Unpacked color (rgb + alpha)
                 float2 uv : TEXCOORD0;          // UV for Gaussian falloff
+                nointerpolation uint debugMode : TEXCOORD1; // 1 = debug point, 0 = normal
             };
+
+            // Shared: fetch splat data common to both rendering modes
+            void FetchSplatData(uint instanceID, uint vertexID,
+                out SplatViewData view, out half4 color, out float2 quadPos, out bool culled)
+            {
+                culled = false;
+                color = (half4)0;
+                quadPos = float2(0, 0);
+                view = (SplatViewData)0;
+
+                if (instanceID >= (uint)_SplatCount)
+                {
+                    culled = true;
+                    return;
+                }
+
+                uint splatIdx = _OrderBuffer[instanceID];
+                view = _SplatViewData[splatIdx];
+
+                if (view.pos.w <= 0)
+                {
+                    culled = true;
+                    return;
+                }
+
+                // Unpack FP16 color
+                color.r = f16tof32(view.color.x >> 16);
+                color.g = f16tof32(view.color.x);
+                color.b = f16tof32(view.color.y >> 16);
+                color.a = f16tof32(view.color.y);
+
+                // Quad corners for 2 triangles (CCW winding)
+                static const float2 quadCorners[6] = {
+                    float2(-1, -1), float2(1, -1), float2(1, 1),
+                    float2(-1, -1), float2(1, 1), float2(-1, 1)
+                };
+                quadPos = quadCorners[vertexID];
+            }
+
+            // Normal splat vertex: elliptical Gaussian quad
+            Varyings VertSplat(SplatViewData view, half4 color, float2 quadPos)
+            {
+                Varyings output = (Varyings)0;
+                output.color = color;
+                output.debugMode = 0;
+
+                // Scale quad by 2x to cover full Gaussian extent
+                quadPos *= 2.0;
+                output.uv = quadPos;
+
+                // Compute screen-space offset using precomputed ellipse axes
+                float2 deltaScreenPos = (quadPos.x * view.axis1 + quadPos.y * view.axis2) * 2.0 / _ScreenParams.xy;
+
+                output.positionCS = view.pos;
+                output.positionCS.xy += deltaScreenPos * view.pos.w;
+                return output;
+            }
+
+            // Debug point vertex: uniform-size camera-facing square
+            Varyings VertDebugPoint(SplatViewData view, half4 color, float2 quadPos)
+            {
+                Varyings output = (Varyings)0;
+                output.color = color;
+                output.debugMode = 1;
+                output.uv = quadPos; // [-1, 1] range
+
+                // Uniform square billboard using precomputed axes (already set to uniform size in compute)
+                float2 deltaScreenPos = (quadPos.x * view.axis1 + quadPos.y * view.axis2) * 2.0 / _ScreenParams.xy;
+
+                output.positionCS = view.pos;
+                output.positionCS.xy += deltaScreenPos * view.pos.w;
+                return output;
+            }
 
             Varyings Vert(uint vertexID : SV_VertexID, uint instanceID : SV_InstanceID)
             {
-                Varyings output = (Varyings)0;
-                
-                // instanceID is in render order (0 = first to render = farthest)
-                // vertexID is 0-5 for the 6 vertices of the quad (2 triangles)
-                
-                // Bounds check
-                if (instanceID >= (uint)_SplatCount)
+                SplatViewData view;
+                half4 color;
+                float2 quadPos;
+                bool culled;
+                FetchSplatData(instanceID, vertexID, view, color, quadPos, culled);
+
+                if (culled)
                 {
-                    output.positionCS = asfloat(0x7fc00000);  // NaN discards primitive
+                    Varyings output = (Varyings)0;
+                    output.positionCS = asfloat(0x7fc00000);
                     return output;
                 }
-                
-                // Look up the original splat index from sorted order
-                uint splatIdx = _OrderBuffer[instanceID];
-                
-                // Fetch precomputed view data for this splat
-                SplatViewData view = _SplatViewData[splatIdx];
-                float4 centerClipPos = view.pos;
-                
-                // Cull if behind camera or marked as culled (w <= 0)
-                if (centerClipPos.w <= 0)
-                {
-                    output.positionCS = asfloat(0x7fc00000);  // NaN discards primitive
-                    return output;
-                }
-                
-                // Unpack FP16 color
-                output.color.r = f16tof32(view.color.x >> 16);
-                output.color.g = f16tof32(view.color.x);
-                output.color.b = f16tof32(view.color.y >> 16);
-                output.color.a = f16tof32(view.color.y);
-                
-                // Quad corners for 2 triangles (CCW winding)
-                // Triangle 1: 0,1,2  Triangle 2: 3,4,5
-                static const float2 quadCorners[6] = {
-                    float2(-1, -1), float2(1, -1), float2(1, 1),   // First triangle
-                    float2(-1, -1), float2(1, 1), float2(-1, 1)    // Second triangle
-                };
-                
-                float2 quadPos = quadCorners[vertexID];
-                
-                // Scale quad by 2x to cover full Gaussian extent
-                // (axis already includes sqrt(2*lambda))
-                quadPos *= 2.0;
-                
-                // Store UV for fragment shader Gaussian evaluation
-                output.uv = quadPos;
-                
-                // Compute screen-space offset using precomputed ellipse axes
-                // Axes are in pixels, convert to normalized device coordinates
-                float2 deltaScreenPos = (quadPos.x * view.axis1 + quadPos.y * view.axis2) * 2.0 / _ScreenParams.xy;
-                
-                // Final clip position = center + offset * w (perspective-correct)
-                output.positionCS = centerClipPos;
-                output.positionCS.xy += deltaScreenPos * centerClipPos.w;
-                
-                return output;
+
+                if (_ShowSplatCenters)
+                    return VertDebugPoint(view, color, quadPos);
+                else
+                    return VertSplat(view, color, quadPos);
             }
 
             half4 Frag(Varyings input) : SV_Target
             {   
+                // Debug point mode: render as solid colored disc
+                if (input.debugMode)
+                {
+                    float dist = dot(input.uv, input.uv);
+                    if (dist > 1.0)
+                        discard;
+                    return half4(input.color.rgb, 1.0);
+                }
+
                 // Gaussian falloff: exp(-r^2) where r^2 = dot(uv, uv)
                 // UV range is [-2, 2] so effective sigma coverage is good
                 float power = -dot(input.uv, input.uv);

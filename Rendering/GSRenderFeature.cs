@@ -168,6 +168,8 @@ namespace GaussianSplatting
                 public Matrix4x4 projMatrix;
                 public Vector3 cameraWorldPos;  // Camera world position for view-dependent SH
                 public GSComponent[] components;
+                public bool[] showSplatCenters;     // Per-component debug center toggle
+                public float[] centerPointSizes;    // Per-component center point size
             }
 
             /// <summary>
@@ -185,6 +187,10 @@ namespace GaussianSplatting
                 public Vector3 cameraWorldPos;      // Camera position for view-dependent SH
                 public GSComponent[] components;
                 public bool needsSort;  // Whether sorting is actually needed this frame
+                public float[] splatScales;         // Per-component splat scale from GSComponent
+                public int[] colorSpaceModes;       // Per-component color space mode
+                public bool[] debugPoints;          // Per-component debug point toggle
+                public float[] debugPointSizes;     // Per-component debug point size
             }
 
             private static int kernelInitSortBuffers = -1;
@@ -302,10 +308,20 @@ namespace GaussianSplatting
                     // Compute per-splat view data (clip pos, ellipse axes, color)
                     // Also precomputes all expensive per-splat data so vertex shader only does quad expansion
                     context.cmd.SetComputeVectorParam(data.sortingShader, "_VecScreenParams", data.screenParams);
-                    context.cmd.SetComputeFloatParam(data.sortingShader, "_SplatScale", data.splatSize);
+                    // Use per-component splat scale (from GSComponent slider) multiplied by global setting
+                    float effectiveSplatScale = data.splatSize * (data.splatScales != null && i < data.splatScales.Length ? data.splatScales[i] : 1.0f);
+                    context.cmd.SetComputeFloatParam(data.sortingShader, "_SplatScale", effectiveSplatScale);
                     context.cmd.SetComputeVectorParam(data.sortingShader, "_CameraWorldPos", data.cameraWorldPos);
                     context.cmd.SetComputeIntParam(data.sortingShader, "_SHBands", component.ShBandsNumber);
                     context.cmd.SetComputeIntParam(data.sortingShader, "_SHRestCount", component.gsAsset != null ? component.gsAsset.SHRestCount : 0);
+                    // Color space mode from GSComponent
+                    int csMode = (data.colorSpaceModes != null && i < data.colorSpaceModes.Length) ? data.colorSpaceModes[i] : 0;
+                    context.cmd.SetComputeIntParam(data.sortingShader, "_ColorSpaceMode", csMode);
+                    // Debug points mode
+                    bool debugPts = data.debugPoints != null && i < data.debugPoints.Length && data.debugPoints[i];
+                    context.cmd.SetComputeIntParam(data.sortingShader, "_DebugPoints", debugPts ? 1 : 0);
+                    float debugPtSize = data.debugPointSizes != null && i < data.debugPointSizes.Length ? data.debugPointSizes[i] : 3.0f;
+                    context.cmd.SetComputeFloatParam(data.sortingShader, "_DebugPointSize", debugPtSize);
                     
                     // Compute combined model-view matrix
                     Matrix4x4 matrixMV = data.viewMatrix; // Model is identity since we apply model transform in shader
@@ -355,6 +371,12 @@ namespace GaussianSplatting
                     mpb.SetBuffer("_SplatViewData", resources.GetSplatViewData());
                     mpb.SetBuffer("_OrderBuffer", resources.SortIndices);
                     mpb.SetInteger("_SplatCount", component.ActiveSplatCount);
+                    
+                    // Debug: show splat centers as points
+                    bool showCenters = data.showSplatCenters != null && i < data.showSplatCenters.Length && data.showSplatCenters[i];
+                    mpb.SetInteger("_ShowSplatCenters", showCenters ? 1 : 0);
+                    float centerSize = data.centerPointSizes != null && i < data.centerPointSizes.Length ? data.centerPointSizes[i] : 0.02f;
+                    mpb.SetFloat("_CenterPointSize", centerSize);
 
                     context.cmd.DrawProcedural(
                         Matrix4x4.identity,
@@ -428,9 +450,17 @@ namespace GaussianSplatting
 
                         int componentCount = components?.Count ?? 0;
                         sortPassData.components = componentCount > 0 ? new GSComponent[componentCount] : Array.Empty<GSComponent>();
+                        sortPassData.splatScales = new float[componentCount];
+                        sortPassData.colorSpaceModes = new int[componentCount];
+                        sortPassData.debugPoints = new bool[componentCount];
+                        sortPassData.debugPointSizes = new float[componentCount];
                         for (int i = 0; i < componentCount; i++)
                         {
                             sortPassData.components[i] = components[i];
+                            sortPassData.splatScales[i] = components[i].splatScale;
+                            sortPassData.colorSpaceModes[i] = (int)components[i].colorSpaceMode;
+                            sortPassData.debugPoints[i] = components[i].showSplatCenters;
+                            sortPassData.debugPointSizes[i] = components[i].centerPointSize;
                         }
 
                         sortBuilder.SetRenderFunc((SortPassData data, ComputeGraphContext context) => ExecuteSortPass(data, context));
@@ -459,9 +489,13 @@ namespace GaussianSplatting
 
                     int componentCount = components?.Count ?? 0;
                     passData.components = componentCount > 0 ? new GSComponent[componentCount] : Array.Empty<GSComponent>();
+                    passData.showSplatCenters = new bool[componentCount];
+                    passData.centerPointSizes = new float[componentCount];
                     for (int i = 0; i < componentCount; i++)
                     {
                         passData.components[i] = components[i];
+                        passData.showSplatCenters[i] = components[i].showSplatCenters;
+                        passData.centerPointSizes[i] = components[i].centerPointSize;
                     }
 
                     // Assigns the ExecutePass function to the render pass delegate. This will be called by the render graph when executing the pass.

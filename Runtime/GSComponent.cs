@@ -13,6 +13,32 @@ namespace GaussianSplatting
         [Header("Quality Settings")]
         public GSAsset gsAsset;            // Reference to the GSAsset containing splat data
         public int maxSplats = 1000000000;  //1 billion by default
+        
+        [Header("Rendering")]
+        [Tooltip("Color space conversion mode for splat colors.\nAuto: uses Unity's current color space.\nForceLinear: always convert gamma→linear.\nForceGamma: no conversion (keep gamma).")]
+        public ColorSpaceMode colorSpaceMode = ColorSpaceMode.Auto;
+
+        [Range(0.1f, 3.0f)]
+        [Tooltip("Global scale multiplier for splat size.")]
+        public float splatScale = 1.0f;
+
+        [Header("Debugging")]
+        [Tooltip("Render splat centers as small points instead of full Gaussians.")]
+        public bool showSplatCenters = false;
+
+        [Range(1.0f, 20.0f)]
+        [Tooltip("Size of the debug center points in pixels.")]
+        public float centerPointSize = 1.0f;
+
+        /// <summary>
+        /// Color space conversion mode.
+        /// </summary>
+        public enum ColorSpaceMode
+        {
+            Auto,           // Use Unity's project color space setting
+            ForceLinear,    // Always convert gamma to linear
+            ForceGamma      // Never convert (keep gamma-space colors)
+        }
                 
         // Gets the model position, rotation and scale from the GameObject's Transform
         public Vector3 modelPosition => transform.position;
@@ -329,7 +355,7 @@ namespace GaussianSplatting
             }
         */
 
-
+        /*
         public void DebugPrintSortedIndices(int count = 10)
         {
             if (sortingResources == null || !sortingResources.IsInitialized)
@@ -507,6 +533,6 @@ namespace GaussianSplatting
                 DebugPrintBuffers();  // Comprehensive debug output
             }
 #endif
-        }
+        }*/
     }
 }

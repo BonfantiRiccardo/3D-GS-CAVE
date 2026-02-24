@@ -238,7 +238,7 @@ void ComputeEllipseAxes(float3 cov2D, out float2 axis1, out float2 axis2, out fl
 float3 SHToColor(float3 sh_dc)
 {
     float3 rgb = sh_dc * SH_C0 + 0.5;
-    return saturate(rgb);
+    return max(rgb, 0);
 }
 
 // Convert a single channel from sRGB (gamma ~2.2) to linear
@@ -373,7 +373,7 @@ float3 EvaluateSH(
         }
     }
     
-    return saturate(max(result, 0.0));
+    return max(result, 0);
 }
 
 // Alternative: direct color pass-through for PLY files with pre-computed colors

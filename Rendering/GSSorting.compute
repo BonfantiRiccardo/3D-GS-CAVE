@@ -70,6 +70,9 @@ float _SplatScale;          // Global splat scale multiplier
 int _SHBands;               // Number of SH bands (0-3)
 int _SHRestCount;           // Number of SH rest floats per splat
 float3 _CameraWorldPos;     // Camera world position for view-dependent SH
+int _ColorSpaceMode;        // 0 = Auto (use Unity setting), 1 = ForceLinear, 2 = ForceGamma
+int _DebugPoints;           // 1 = render as uniform billboard points, 0 = normal splat rendering
+float _DebugPointSize;      // Size of debug points in pixels
 
 // Model transform (must match shader)
 float3 _ModelPosition;      // Model position offset
@@ -234,7 +237,52 @@ void CalcSplatViewData(uint3 id : SV_DispatchThreadID)
     
     view.pos = clipPos;
     
-    // Compute 3D covariance in world space
+    // Compute view direction for SH evaluation (needed for both modes)
+    float3 viewDir = normalize(_CameraWorldPos - worldPos);
+    
+    // Evaluate spherical harmonics for view-dependent color
+    float3 rgb;
+    if (_SHBands > 0 && _SHRestCount > 0)
+    {
+        rgb = EvaluateSH(shColor.rgb, _SHRest, _SHRestCount, idx, viewDir, _SHBands);
+    }
+    else
+    {
+        rgb = SHToColor(shColor.rgb);
+    }
+    
+    // Convert to linear color space based on mode
+    // 0 = Auto: use Unity's color space setting
+    // 1 = ForceLinear: always convert
+    // 2 = ForceGamma: never convert
+    bool convertToLinear = false;
+    if (_ColorSpaceMode == 1)
+        convertToLinear = true;
+    else if (_ColorSpaceMode == 0)
+    {
+        #ifndef UNITY_COLORSPACE_GAMMA
+            convertToLinear = true;
+        #endif
+    }
+    if (convertToLinear)
+        rgb = GammaToLinear(rgb);
+    
+    // Pack color as FP16
+    // x = (r_fp16 << 16) | g_fp16, y = (b_fp16 << 16) | a_fp16
+    view.color.x = (f32tof16(rgb.r) << 16) | f32tof16(rgb.g);
+    view.color.y = (f32tof16(rgb.b) << 16) | f32tof16(shColor.a);
+    
+    // Debug points mode: skip covariance, use uniform-size billboard axes
+    if (_DebugPoints)
+    {
+        float pointRadius = _DebugPointSize * 0.5;
+        view.axis1 = float2(pointRadius, 0);
+        view.axis2 = float2(0, pointRadius);
+        _SplatViewData[idx] = view;
+        return;
+    }
+    
+    // Normal splat mode: compute 3D covariance and project to 2D ellipse
     float3 covA, covB;
     ComputeCovariance3D(worldQuat, worldScale, covA, covB);
     
@@ -255,30 +303,6 @@ void CalcSplatViewData(uint3 id : SV_DispatchThreadID)
     float maxSize = 4096.0;
     view.axis1 = min(sqrt(2.0 * lambda1), maxSize) * diagVec;
     view.axis2 = min(sqrt(2.0 * lambda2), maxSize) * float2(diagVec.y, -diagVec.x);
-    
-    // Compute view direction for SH evaluation
-    float3 viewDir = normalize(_CameraWorldPos - worldPos);
-    
-    // Evaluate spherical harmonics for view-dependent color
-    float3 rgb;
-    if (_SHBands > 0 && _SHRestCount > 0)
-    {
-        rgb = EvaluateSH(shColor.rgb, _SHRest, _SHRestCount, idx, viewDir, _SHBands);
-    }
-    else
-    {
-        rgb = SHToColor(shColor.rgb);
-    }
-    
-    // Convert to linear color space if needed
-    #ifndef UNITY_COLORSPACE_GAMMA
-        rgb = GammaToLinear(rgb);
-    #endif
-    
-    // Pack color as FP16
-    // x = (r_fp16 << 16) | g_fp16, y = (b_fp16 << 16) | a_fp16
-    view.color.x = (f32tof16(rgb.r) << 16) | f32tof16(rgb.g);
-    view.color.y = (f32tof16(rgb.b) << 16) | f32tof16(shColor.a);
     
     _SplatViewData[idx] = view;
 }
