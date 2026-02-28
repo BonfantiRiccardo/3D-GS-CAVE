@@ -94,18 +94,15 @@ float4 ViewToClip(float3 viewPos)
 
 // Compute a depth-only sort key for back-to-front rendering
 // For ascending sort with back-to-front rendering:
-// - Farther objects should render FIRST (lower sort index)
-// - Closer objects should render LAST (higher sort index)
-// We use raw view-space Z for maximum precision (no normalization loss)
+// - Farther objects should render Fist (lower sort index)
+// - Closer objects should render Last (higher sort index)
 float ComputeDepthSortKey(float viewZ)
 {
     // viewZ is negative for objects in front of camera (Unity convention)
     // More negative = farther away
-    //
-    // Simply return viewZ directly:
     // - Far object at viewZ = -100 → key = -100 (smaller)
     // - Close object at viewZ = -3 → key = -3 (larger)
-    // Ascending sort: -100 < -3, so far objects come first ✓
+    // Ascending sort: -100 < -3, so far objects come first
     return viewZ;
 }
 
@@ -157,7 +154,7 @@ void CalcViewData(uint3 id : SV_DispatchThreadID)
     _ViewData[idx] = float4(viewPos, visible);
 }
 
-// Calculate sort keys based on depth only (no tiles)
+// Calculate sort keys based on depth
 // This kernel runs after CalcViewData
 [numthreads(GROUP_SIZE, 1, 1)]
 void CalcSortKeys(uint3 id : SV_DispatchThreadID)

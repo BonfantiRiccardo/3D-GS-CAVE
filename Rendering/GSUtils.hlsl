@@ -5,24 +5,21 @@
 // Gaussian Splatting helper functions & structs
 // most of these are from https://github.com/playcanvas/engine/tree/main/src/scene/shader-lib/glsl/chunks/gsplat
 // Copyright (c) 2011-2024 PlayCanvas Ltd
-// Copyright (c) 2025 Yize Wu
+// SPDX-License-Identifier: MIT
+
+// SH coefficient computation inspired by aras-p/UnityGaussianSplatting
+// https://github.com/aras-p/UnityGaussianSplatting
 // SPDX-License-Identifier: MIT
 
 #ifndef GS_UTILS_INCLUDED
 #define GS_UTILS_INCLUDED
 
-// ============================================================================
 // Spherical Harmonics coefficients for view-dependent color computation
-// SH coefficient computation inspired by aras-p/UnityGaussianSplatting
-// https://github.com/aras-p/UnityGaussianSplatting
-// SPDX-License-Identifier: MIT
-// ============================================================================
-
 // Spherical Harmonics coefficient for DC term (band 0)
 // SH_C0 = 1 / (2 * sqrt(pi)) ≈ 0.28209479177387814
 static const float SH_C0 = 0.28209479177387814;
 
-// Spherical Harmonics coefficients for higher bands
+// higher bands
 // SH_C1 = sqrt(3) / (2 * sqrt(pi)) ≈ 0.4886025
 static const float SH_C1 = 0.4886025;
 
@@ -82,59 +79,10 @@ void ComputeCovariance3D(float4 quat, float3 scale, out float3 covA, out float3 
     covB = float3(sigma._m11,  // Σ[1][1]
                   sigma._m12,  // Σ[1][2]
                   sigma._m22); // Σ[2][2]
-    }
+}
 
 // Project 3D covariance to 2D screen space using EWA (Elliptical Weighted Average)
 // Uses the Jacobian of perspective projection for accurate ellipse computation
-// viewMatrix: world-to-view transformation matrix
-// projMatrix: projection matrix for extracting tan(fov)
-// Returns: (cov2D[0][0], cov2D[0][1], cov2D[1][1])
-float3 ProjectCovariance(float3 covA, float3 covB, float3 viewPos, float focal, float3x3 viewRotation, float4x4 projMatrix)
-{
-    // Build symmetric 3D covariance matrix
-    float3x3 cov3D = float3x3(
-        covA.x, covA.y, covA.z,
-        covA.y, covB.x, covB.y,
-        covA.z, covB.y, covB.z
-    );
-    
-    // Clamp view position to prevent numerical instability for splats near edges
-    // This is needed for splats visible in view but heavily clipped
-    float aspect = projMatrix._m00 / projMatrix._m11;
-    float tanFovX = 1.0 / projMatrix._m00;
-    float tanFovY = 1.0 / (projMatrix._m11 * aspect);
-    float limX = 1.3 * tanFovX;
-    float limY = 1.3 * tanFovY;
-    float3 clampedViewPos = viewPos;
-    clampedViewPos.x = clamp(viewPos.x / viewPos.z, -limX, limX) * viewPos.z;
-    clampedViewPos.y = clamp(viewPos.y / viewPos.z, -limY, limY) * viewPos.z;
-    
-    // Jacobian of perspective projection
-    // J = | fx/z    0    -fx*x/z² |
-    //     |   0   fy/z   -fy*y/z² |
-    // Assumes fx = fy = focal
-    float z = clampedViewPos.z;
-    float invZ = 1.0 / z;
-    float invZ2 = invZ * invZ;
-    
-    float3x3 J = float3x3(
-        focal * invZ, 0.0, -focal * clampedViewPos.x * invZ2,
-        0.0, focal * invZ, -focal * clampedViewPos.y * invZ2,
-        0.0, 0.0, 0.0
-    );
-    
-    // Transform covariance: cov2D = J * W * cov3D * W^T * J^T
-    // where W is the view rotation matrix
-    float3x3 T = mul(J, viewRotation);
-    float3x3 cov2D_full = mul(mul(T, cov3D), transpose(T));
-    
-    // Add low-pass filter for numerical stability (prevents aliasing)
-    cov2D_full[0][0] += 0.3;
-    cov2D_full[1][1] += 0.3;
-    
-    return float3(cov2D_full[0][0], cov2D_full[0][1], cov2D_full[1][1]);
-}
-
 // from "EWA Splatting" (Zwicker et al 2002) eq. 31
 float3 CalcCovariance2D(float3 worldPos, float3 cov3d0, float3 cov3d1, float4x4 matrixV, float4x4 matrixP, float4 screenParams)
 {
@@ -172,65 +120,6 @@ float3 CalcCovariance2D(float3 worldPos, float3 cov3d0, float3 cov3d1, float4x4 
     return float3(cov._m00, cov._m01, cov._m11);
 }
 
-// Compute eigenvalues and eigenvectors of 2D covariance for ellipse rendering
-// Input: cov2D = (a, b, c) representing matrix | a  b |
-//                                               | b  c |
-// Returns: xy = major axis direction (normalized), zw = (major_radius, minor_radius) in pixels
-void ComputeEllipseAxes(float3 cov2D, out float2 axis1, out float2 axis2, out float radius1, out float radius2)
-{
-    float a = cov2D.x;  // cov[0][0]
-    float b = cov2D.y;  // cov[0][1]
-    float c = cov2D.z;  // cov[1][1]
-    
-    // Eigenvalues of 2x2 symmetric matrix: λ = (trace ± sqrt(trace² - 4*det)) / 2
-    float trace = a + c;
-    float det = a * c - b * b;
-    float discriminant = sqrt(max(0.25 * trace * trace - det, 0.0));
-    
-    float lambda1 = 0.5 * trace + discriminant;  // Larger eigenvalue
-    float lambda2 = 0.5 * trace - discriminant;  // Smaller eigenvalue
-    
-    // Clamp to avoid numerical issues with very small splats
-    lambda1 = max(lambda1, 0.01);
-    lambda2 = max(lambda2, 0.01);
-    
-    // Eigenvector for larger eigenvalue
-    float2 v1;
-    if (abs(b) > 1e-6)
-    {
-        v1 = normalize(float2(lambda1 - c, b));
-    }
-    else
-    {
-        v1 = (a >= c) ? float2(1, 0) : float2(0, 1);
-    }
-
-    v1.y = -v1.y;
-    // The 2nd eigenvector is just a 90 degree rotation of the first since Gaussian axes are orthogonal
-    float2 v2 = float2(v1.y, -v1.x);
-
-    // scaling components
-    v1 *= sqrt(lambda1);
-    v2 *= sqrt(lambda2);
-
-    float radius = 1.5;
-    v1 *= radius;
-    v2 *= radius;
-    
-    axis1 = v1;
-    axis2 = v2;
-
-    // Radii = sqrt(eigenvalues) * 3 to cover 3-sigma (99.7% of Gaussian mass)
-    float r1 = 3.0 * sqrt(lambda1);
-    float r2 = 3.0 * sqrt(lambda2);
-
-    radius1 = length(v1);
-    radius2 = length(v2);
-    /*
-    return float4(v1.x, v1.y, r1, r2);
-    */
-}
-
 
 // Convert SH DC coefficients to RGB color
 // Standard formula: color = sh_dc * SH_C0 + 0.5
@@ -261,30 +150,10 @@ float3 GammaToLinear(float3 color)
     );
 }
 
-// Simplified gamma to linear using power 2.2 approximation
-// Faster but less accurate than full sRGB transfer function
-float3 GammaToLinearFast(float3 color)
-{
-    return pow(max(color, 0.0), 2.2);
-}
 
-// ============================================================================
 // Spherical Harmonics view-dependent color computation
-// Computes view-dependent color using SH bands 0-3
-// Based on aras-p/UnityGaussianSplatting implementation
-// https://github.com/aras-p/UnityGaussianSplatting
+// Based on aras-p/UnityGaussianSplatting implementation - https://github.com/aras-p/UnityGaussianSplatting
 // SPDX-License-Identifier: MIT
-// ============================================================================
-
-// Evaluate spherical harmonics for view-dependent color
-// Parameters:
-//   sh_dc: DC term (band 0) coefficients (RGB)
-//   shRest: Higher band coefficients (bands 1-3), stored as float array
-//   shRestCount: Number of floats per splat in shRest (3 * (bands^2 - 1))
-//   splatIndex: Index of the current splat
-//   viewDir: World-space view direction from splat to camera (normalized)
-//   shOrder: Number of SH bands to evaluate (0-3)
-// Returns: Final RGB color
 float3 EvaluateSH(
     float3 sh_dc,
     StructuredBuffer<float> shRest,

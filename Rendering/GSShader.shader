@@ -1,6 +1,3 @@
-// Gaussian Splatting Shader - Efficient instanced rendering with precomputed view data
-// Uses SplatViewData buffer precomputed in compute shader for minimal vertex work
-// Implements back-to-front rendering for correct alpha compositing
 Shader "GaussianSplatting/GSShader"
 {
     Properties
