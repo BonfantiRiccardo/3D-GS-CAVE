@@ -10,7 +10,7 @@ namespace GaussianSplatting.Editor
     /// PLYImporter is responsible for importing PLY files as GSAsset ScriptableObjects.
     /// Uses the buffered AsyncPLYParser for high-performance import of large files.
     /// </summary>
-    [ScriptedImporter(3, "ply")]
+    [ScriptedImporter(4, "ply")]
     public class PLYImporter : ScriptedImporter
     {
         [SerializeField]
@@ -99,7 +99,7 @@ namespace GaussianSplatting.Editor
 
         /// <summary>
         /// Called when the asset is imported. Creates a GSAsset from the PLY file.
-        /// Uses AsyncPLYParser with buffered I/O and editor progress bar.
+        /// Writes external .bytes data files to Models/{plyName}/ at the project root.
         /// </summary>
         public override void OnImportAsset(AssetImportContext ctx)
         {
@@ -118,15 +118,26 @@ namespace GaussianSplatting.Editor
                 data = PLYParser.Parse(ctx.assetPath);
             }
 
-            GSAsset asset = GSAssetBuilder.BuildAsset(data);
-            asset.name = Path.GetFileNameWithoutExtension(ctx.assetPath);
+            // Create external data directory: {ProjectRoot}/Models/{plyName}/
+            string plyName = Path.GetFileNameWithoutExtension(ctx.assetPath);
+            string relativeDataPath = "Models/" + plyName;
+            string projectRoot = Directory.GetParent(Application.dataPath).FullName;
+            string absoluteDataPath = Path.Combine(projectRoot, "Models", plyName);
+
+            // Write external .bytes data files (positions, rotations, scales, sh, shrest)
+            GSAssetBuilder.WriteExternalData(data, absoluteDataPath);
+
+            // Build asset with metadata only (no inline byte[] blobs)
+            GSAsset asset = GSAssetBuilder.BuildAsset(data, relativeDataPath);
+            asset.name = plyName;
 
             Debug.Log(
                 $"PLY import: {ctx.assetPath} | Splats={data.Positions?.Length ?? 0} | " +
                 $"SH={data.ImportedSHQuality} | SHRestCount={data.SHRestCount} | " +
                 $"Flip={data.AppliedFlip} | " +
                 $"HasRot={data.HasRotations} | HasScale={data.HasScales} | " +
-                $"HasColor={data.HasColors} | HasOpacity={data.HasOpacity}");
+                $"HasColor={data.HasColors} | HasOpacity={data.HasOpacity} | " +
+                $"ExternalData={absoluteDataPath}");
 
             ctx.AddObjectToAsset("GSAsset", asset);
             ctx.SetMainObject(asset);

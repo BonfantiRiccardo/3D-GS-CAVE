@@ -5,6 +5,7 @@ namespace GaussianSplatting.Editor
 {
     /// <summary>
     /// Custom inspector for GSAsset ScriptableObjects.
+    /// Uses metadata-only accessors to avoid triggering data loading from external .bytes files.
     /// </summary>
     [CustomEditor(typeof(GSAsset))]
     public class GSAssetInspector : UnityEditor.Editor
@@ -23,19 +24,19 @@ namespace GaussianSplatting.Editor
             using (new EditorGUI.DisabledScope(true))
             {
                 EditorGUILayout.IntField("Splat Count", asset.splatCount);
-                // Use byte[] lengths divided by element stride to avoid reconstructing typed arrays
-                EditorGUILayout.IntField("Position Data", asset.PositionData != null ? asset.PositionData.Length / 12 : 0);
-                EditorGUILayout.IntField("Rotation Data", asset.RotationData != null ? asset.RotationData.Length / 16 : 0);
-                EditorGUILayout.IntField("Scale Data", asset.ScaleData != null ? asset.ScaleData.Length / 12 : 0);
-                EditorGUILayout.IntField("SH DC Data", asset.SHData != null ? asset.SHData.Length / 16 : 0);
                 EditorGUILayout.IntField("SH Rest Count/Splat", asset.SHRestCount);
-                EditorGUILayout.IntField("SH Rest Total", asset.SHRestData != null ? asset.SHRestData.Length / 4 : 0);
-                
-                // Estimate total asset memory in MB
-                long totalBytes = (asset.PositionData?.Length ?? 0) + (asset.RotationData?.Length ?? 0) +
-                                  (asset.ScaleData?.Length ?? 0) + (asset.SHData?.Length ?? 0) +
-                                  (asset.SHRestData?.Length ?? 0);
-                EditorGUILayout.TextField("Total Data", $"{totalBytes / (1024.0 * 1024.0):F1} MB");
+
+                // Compute estimated total data size from metadata (no file loading)
+                EditorGUILayout.TextField("Total Data", $"{asset.EstimatedTotalDataSize / (1024.0 * 1024.0):F1} MB");
+            }
+
+            // Show data storage location
+            EditorGUILayout.Space();
+            EditorGUILayout.LabelField("Data Storage", EditorStyles.boldLabel);
+
+            using (new EditorGUI.DisabledScope(true))
+            {
+                EditorGUILayout.TextField("Location", asset.ExternalDataPath ?? "(not set)");
             }
 
             EditorGUILayout.Space();

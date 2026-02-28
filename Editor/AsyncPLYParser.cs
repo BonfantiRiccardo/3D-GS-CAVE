@@ -20,8 +20,8 @@ namespace GaussianSplatting.Editor
     /// Flexibility:
     /// 1. Multiple property name conventions (f_dc_0/red/r, rot_0/qw, scale_0/scale_x, ...)
     /// 2. Type-aware conversion (SH colors can be stored as uchars or floats)
-    /// - Graceful handling of missing properties (identity rotation, unit scale, white color, full opacity)
-    /// - SH import quality levels: Full, Reduced (Band 1), None (DC only)
+    /// 3. Graceful handling of missing properties (identity rotation, unit scale, neutral color, full opacity)
+    /// 4. SH import quality levels: Full, Reduced (Band 1), None (DC only)
     ///
     /// SH quality level concept inspired by aras-p/UnityGaussianSplatting.
     /// </summary>
@@ -301,19 +301,7 @@ namespace GaussianSplatting.Editor
 
         /// <summary>
         /// Resolves property names to byte offsets and determines conversion flags.
-        /// All string matching happens here, once per file.
-        /// Supported name conventions:
-        /// - Position: x, y, z
-        /// - Colors: f_dc_0/1/2 (SH DC, preferred) OR red/green/blue/r/g/b (direct color)
-        /// - Rotation: rot_0/1/2/3 (WXYZ, 3DGS standard) OR qx/qy/qz/qw (XYZW)
-        /// - Scale: scale_0/1/2 OR scale_x/y/z
-        /// - Opacity: opacity OR alpha
-        /// - SH rest: f_rest_N (N = 0, 1, 2, ...)
-        ///
-        /// Type-aware conversion:
-        /// - uchar colors (0-255) are normalized and converted to SH DC representation
-        /// - Float-type opacity is assumed pre-sigmoid (standard 3DGS); integer types are linear
-        /// - Float-type scale is assumed log-encoded (standard 3DGS); integer types are linear
+        /// Allows flexible property naming conventions and graceful handling of missing data.
         /// </summary>
         private static PropertyLayout BuildPropertyLayout(List<PLYProperty> properties, SHImportQuality shQuality)
         {
@@ -426,16 +414,7 @@ namespace GaussianSplatting.Editor
 
         /// <summary>
         /// Builds the SH rest coefficient mapping based on the requested quality level.
-        ///
         /// In standard 3DGS PLY files, SH rest coefficients are stored grouped by channel:
-        /// - f_rest_0..N-1: Red channel (N = coeffsPerChannel = restCount/3)
-        /// - f_rest_N..2N-1: Green channel
-        /// - f_rest_2N..3N-1: Blue channel
-        ///
-        /// SH quality levels:
-        /// - Full: Import all rest coefficients as-is
-        /// - Reduced: Import only Band 1
-        /// - None: No rest coefficients
         /// </summary>
         private static void BuildRestLayout(
             PropertyLayout layout,
