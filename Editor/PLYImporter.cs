@@ -120,9 +120,9 @@ namespace GaussianSplatting.Editor
 
             // Create external data directory: {ProjectRoot}/Models/{plyName}/
             string plyName = Path.GetFileNameWithoutExtension(ctx.assetPath);
-            string relativeDataPath = "Models/" + plyName;
+            string relativeDataPath = $"Assets/ByteFiles/" + plyName;
             string projectRoot = Directory.GetParent(Application.dataPath).FullName;
-            string absoluteDataPath = Path.Combine(projectRoot, "Models", plyName);
+            string absoluteDataPath = Path.Combine(projectRoot,  "Assets", "ByteFiles", plyName);
 
             // Write external .bytes data files (positions, rotations, scales, sh, shrest)
             GSAssetBuilder.WriteExternalData(data, absoluteDataPath);
