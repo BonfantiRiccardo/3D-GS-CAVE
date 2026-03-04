@@ -7,10 +7,12 @@ using UnityEngine;
 namespace GaussianSplatting.Editor
 {
     /// <summary>
-    /// PLYImporter is responsible for importing PLY files as GSAsset ScriptableObjects.
-    /// Uses the buffered AsyncPLYParser for high-performance import of large files.
+    /// PLYImporter is responsible for importing PLY files as ChunkedGSAsset ScriptableObjects.
+    /// Uses the buffered AsyncPLYParser for high performance import of large files.
+    /// Data is spatially sorted using Morton codes and partitioned into chunks for
+    /// efficient frustum culling and streaming at runtime.
     /// </summary>
-    [ScriptedImporter(4, "ply")]
+    [ScriptedImporter(5, "ply")]
     public class PLYImporter : ScriptedImporter
     {
         [SerializeField]
@@ -23,9 +25,14 @@ namespace GaussianSplatting.Editor
         [SerializeField]
         [Tooltip("Coordinate system handedness flip applied during import.\n" +
                  "None: No flip (data used as-is)\n" +
-                 "FlipZ: Negate Z axis (common for COLMAP / 3DGS right-hand → Unity left-hand)\n" +
+                 "FlipZ: Negate Z axis (common for COLMAP / 3DGS right-hand to Unity left-hand)\n" +
                  "FlipX: Negate X axis (alternative handedness conversion)")]
         private CoordinateFlip m_CoordinateFlip = CoordinateFlip.FlipZ;
+
+        [SerializeField]
+        [Tooltip("Number of splats per spatial chunk. Smaller values give finer culling " +
+                 "granularity but increase chunk management overhead. Recommended: 2048 to 8192.")]
+        private int m_ChunkSize = SpatialSorter.DefaultChunkSize;
 
         private sealed class ImportProgress : IProgress<float>, IDisposable
         {
@@ -98,8 +105,9 @@ namespace GaussianSplatting.Editor
         }
 
         /// <summary>
-        /// Called when the asset is imported. Creates a GSAsset from the PLY file.
-        /// Writes external .bytes data files to Models/{plyName}/ at the project root.
+        /// Called when the asset is imported. Creates a ChunkedGSAsset from the PLY file.
+        /// Data is spatially sorted and partitioned into chunks, then written to
+        /// external .bytes files in Models/{plyName}/ at the project root.
         /// </summary>
         public override void OnImportAsset(AssetImportContext ctx)
         {
@@ -124,22 +132,26 @@ namespace GaussianSplatting.Editor
             string projectRoot = Directory.GetParent(Application.dataPath).FullName;
             string absoluteDataPath = Path.Combine(projectRoot,  "Assets", "ByteFiles", plyName);
 
-            // Write external .bytes data files (positions, rotations, scales, sh, shrest)
-            GSAssetBuilder.WriteExternalData(data, absoluteDataPath);
+            // Use the chunked pipeline: sort spatially, partition, and write
+            progress.Report(0.5f);
+            var (asset, chunks) = ChunkedGSAssetBuilder.ProcessAndBuild(
+                data,
+                absoluteDataPath,
+                relativeDataPath,
+                m_ChunkSize);
 
-            // Build asset with metadata only (no inline byte[] blobs)
-            GSAsset asset = GSAssetBuilder.BuildAsset(data, relativeDataPath);
             asset.name = plyName;
 
             Debug.Log(
-                $"PLY import: {ctx.assetPath} | Splats={data.Positions?.Length ?? 0} | " +
+                $"PLY import (chunked): {ctx.assetPath} | Splats={data.Positions?.Length ?? 0} | " +
+                $"Chunks={chunks.Length} | ChunkSize={m_ChunkSize} | " +
                 $"SH={data.ImportedSHQuality} | SHRestCount={data.SHRestCount} | " +
                 $"Flip={data.AppliedFlip} | " +
                 $"HasRot={data.HasRotations} | HasScale={data.HasScales} | " +
                 $"HasColor={data.HasColors} | HasOpacity={data.HasOpacity} | " +
                 $"ExternalData={absoluteDataPath}");
 
-            ctx.AddObjectToAsset("GSAsset", asset);
+            ctx.AddObjectToAsset("ChunkedGSAsset", asset);
             ctx.SetMainObject(asset);
             progress.Report(1f);
         }

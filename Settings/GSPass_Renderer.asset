@@ -1,5 +1,24 @@
 %YAML 1.1
 %TAG !u! tag:unity3d.com,2011:
+--- !u!114 &-7026257774825864400
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: bcc44e92095042d4cae75cb77ca445d9, type: 3}
+  m_Name: ChunkedGSRenderFeature
+  m_EditorClassIdentifier: Assembly-CSharp::GaussianSplatting.ChunkedGSRenderFeature
+  m_Active: 1
+  settings:
+    enabled: 1
+    renderPassEvent: 450
+    splatMaterial: {fileID: 2100000, guid: 6dd8e28c8c9fb594f84c2c3b3782b92f, type: 2}
+    splatSize: 1
+    sortingShader: {fileID: 7200000, guid: cf0d2e07c0f4e5748aefed56388f94ac, type: 3}
 --- !u!114 &11400000
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -28,7 +47,8 @@ MonoBehaviour:
     probeVolumeBlendStatesCS: {fileID: 0}
   m_RendererFeatures:
   - {fileID: 5497170268805799936}
-  m_RendererFeatureMap: 002002f63bdf494c
+  - {fileID: -7026257774825864400}
+  m_RendererFeatureMap: 002002f63bdf494c30832dcfc7b77d9e
   m_UseNativeRenderPass: 0
   xrSystemData: {fileID: 0}
   postProcessData: {fileID: 11400000, guid: 41439944d30ece34e96484bdb6645b55, type: 2}

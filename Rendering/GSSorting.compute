@@ -58,6 +58,20 @@ RWStructuredBuffer<float4> _ViewData;       // xyz = view pos, w = visible (1) o
 // Precomputed splat view data output (for efficient rendering)
 RWStructuredBuffer<SplatViewData> _SplatViewData;
 
+// Indirection buffer for slot pool based streaming.
+// Maps logical splat index [0, _SplatCount) to physical index in the pool buffers.
+// Assing _UseRemap == 0 to bypass remapping.
+uint _UseRemap;
+StructuredBuffer<uint> _SplatRemap;
+
+// Returns the physical buffer index for a logical splat index.
+uint GetPhysicalIndex(uint logicalIdx)
+{
+    if (_UseRemap)
+        return _SplatRemap[logicalIdx];
+    return logicalIdx;
+}
+
 // Uniforms
 float4x4 _MatrixV;          // View matrix
 float4x4 _MatrixP;          // Projection matrix
@@ -132,8 +146,8 @@ void CalcViewData(uint3 id : SV_DispatchThreadID)
     if (idx >= _SplatCount)
         return;
     
-    // Get local position from buffer
-    float3 localPos = _Positions[idx];
+    // Get local position via indirection (physical index in pool buffer)
+    float3 localPos = _Positions[GetPhysicalIndex(idx)];
     
     // Transform to view space (applies model transform, then view transform)
     float3 viewPos = LocalToView(localPos);
@@ -207,11 +221,12 @@ void CalcSplatViewData(uint3 id : SV_DispatchThreadID)
     // Initialize output
     SplatViewData view = (SplatViewData)0;
     
-    // Load splat data using original index
-    float3 localPos = _Positions[idx];
-    float4 localQuat = _Rotations[idx];
-    float3 localScale = _Scales[idx];
-    float4 shColor = _SH[idx];
+    // Load splat data using physical index from indirection buffer
+    uint physIdx = GetPhysicalIndex(idx);
+    float3 localPos = _Positions[physIdx];
+    float4 localQuat = _Rotations[physIdx];
+    float3 localScale = _Scales[physIdx];
+    float4 shColor = _SH[physIdx];
     
     // Apply model transform
     float3 worldPos = TransformPosition(localPos, _ModelPosition, _ModelRotation, _ModelScale);
@@ -241,7 +256,7 @@ void CalcSplatViewData(uint3 id : SV_DispatchThreadID)
     float3 rgb;
     if (_SHBands > 0 && _SHRestCount > 0)
     {
-        rgb = EvaluateSH(shColor.rgb, _SHRest, _SHRestCount, idx, viewDir, _SHBands);
+        rgb = EvaluateSH(shColor.rgb, _SHRest, _SHRestCount, physIdx, viewDir, _SHBands);
     }
     else
     {
