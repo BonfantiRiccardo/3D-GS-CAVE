@@ -3,8 +3,10 @@ using UnityEngine;
 namespace GaussianSplatting
 {
     /// <summary>
-    /// Manages GPU resources required for depth-based Gaussian splat sorting (allocation and management of compute buffers used
-    /// in the sorting pipeline).
+    /// Manages GPU resources required for depth-based Gaussian splat sorting.
+    /// Buffers are allocated once at a fixed capacity and never reallocated while the capacity
+    /// is sufficient. Only SplatCount and ThreadBlocks are updated each frame so the sort
+    /// shader processes the correct number of active splats.
     /// </summary>
     public class GSSortingResources : System.IDisposable
     {
@@ -17,24 +19,24 @@ namespace GaussianSplatting
         private const int SPLAT_VIEW_DATA_STRIDE = 40;
 
         // Primary sort buffers
-        private ComputeBuffer sortIndices;      // uint[splatCount] - Sort indices (payload) - maps sorted position to original splat index
-        private ComputeBuffer sortIndicesAlt;   // uint[splatCount] - alternate for ping-pong
-        private ComputeBuffer sortKeys;         // float[splatCount] - Sort keys - depth for radix sort
-        private ComputeBuffer sortKeysAlt;      // float[splatCount] - alternate for ping-pong
+        private ComputeBuffer sortIndices;      // uint[capacity]
+        private ComputeBuffer sortIndicesAlt;   // uint[capacity]
+        private ComputeBuffer sortKeys;         // float[capacity]
+        private ComputeBuffer sortKeysAlt;      // float[capacity]
 
         // View data buffer for caching view-space calculations
-        private ComputeBuffer viewData;         // float4[splatCount] - View data - cached view-space positions and visibility flags (xyz=viewPos, w=visible)
+        private ComputeBuffer viewData;         // float4[capacity]
         
         // Precomputed splat view data for efficient rendering (clip pos, ellipse axes, color)
-        private ComputeBuffer splatViewData;    // SplatViewData[splatCount] - precomputed per-splat rendering data
+        private ComputeBuffer splatViewData;    // SplatViewData[capacity]
         
         // Radix sort histogram buffers
-        private ComputeBuffer globalHistogram;  // uint[RADIX * RADIX_PASSES] - global histogram
-        private ComputeBuffer passHistogram;    // uint[RADIX * threadBlocks] - per-pass histogram, used during sorting
-        
-        // Constant buffer for sort parameters
-        private ComputeBuffer sortParams;       // cbuffer with numKeys, radixShift, threadBlocks
-        
+        private ComputeBuffer globalHistogram;  // uint[RADIX * RADIX_PASSES]
+        private ComputeBuffer passHistogram;    // uint[RADIX * maxThreadBlocks]
+
+        // Allocated capacity (never shrinks)
+        private int allocatedCapacity;
+
         // Public properties
         public int SplatCount { get; private set; }
         public int ThreadBlocks { get; private set; }
@@ -56,51 +58,53 @@ namespace GaussianSplatting
         public ComputeBuffer GlobalHistogram => globalHistogram;
         public ComputeBuffer PassHistogram => passHistogram;
         
+        /// <summary>
+        /// Ensures buffers are allocated at the given capacity. If capacity has not
+        /// increased since the last call, no GPU work is performed. Call once at
+        /// startup or when maxVisibleSplats changes on the component.
+        /// </summary>
+        public void EnsureCapacity(int capacity)
+        {
+            if (capacity <= 0) return;
+            if (capacity <= allocatedCapacity && sortIndices != null) return;
+
+            Release();
+            allocatedCapacity = capacity;
+
+            sortIndices = new ComputeBuffer(capacity, sizeof(uint));
+            sortIndicesAlt = new ComputeBuffer(capacity, sizeof(uint));
+            sortKeys = new ComputeBuffer(capacity, sizeof(float));
+            sortKeysAlt = new ComputeBuffer(capacity, sizeof(float));
+            viewData = new ComputeBuffer(capacity, sizeof(float) * 4);
+            splatViewData = new ComputeBuffer(capacity, SPLAT_VIEW_DATA_STRIDE);
+            globalHistogram = new ComputeBuffer(RADIX * RADIX_PASSES, sizeof(uint));
+
+            int maxThreadBlocks = Mathf.CeilToInt((float)capacity / PART_SIZE);
+            int passHistSize = Mathf.Max(RADIX * maxThreadBlocks, RADIX);
+            passHistogram = new ComputeBuffer(passHistSize, sizeof(uint));
+        }
+
+        /// <summary>
+        /// Updates the active splat count and thread block count for the sort shader.
+        /// Does NOT allocate or release any buffers. Call every frame before dispatching
+        /// sort passes.
+        /// </summary>
+        public void SetActiveSplatCount(int activeSplatCount)
+        {
+            SplatCount = activeSplatCount;
+            ThreadBlocks = Mathf.CeilToInt((float)activeSplatCount / PART_SIZE);
+        }
 
         /// <summary>
         /// Initialize sorting resources for the given splat count.
+        /// Kept for backwards compatibility; internally calls EnsureCapacity
+        /// then SetActiveSplatCount.
         /// </summary>
         /// <param name="splatCount">Number of splats to sort</param>
         public void Initialize(int splatCount)
         {
-            // Release existing buffers if sizes changed
-            if (SplatCount != splatCount)
-            {
-                Release();
-            }
-            
-            SplatCount = splatCount;
-            
-            // Calculate thread blocks for radix sort
-            // From the ThirdParty implementation: threadBlocks = ceil(numKeys / PART_SIZE)
-            ThreadBlocks = Mathf.CeilToInt((float)splatCount / PART_SIZE);
-            
-            if (sortIndices != null)
-            {
-                // Already initialized with same splat count
-                return;
-            }
-            
-            // Allocate primary sort buffers
-            sortIndices = new ComputeBuffer(splatCount, sizeof(uint));
-            sortIndicesAlt = new ComputeBuffer(splatCount, sizeof(uint));
-            sortKeys = new ComputeBuffer(splatCount, sizeof(float));
-            sortKeysAlt = new ComputeBuffer(splatCount, sizeof(float));
-            
-            // Allocate view data buffer
-            viewData = new ComputeBuffer(splatCount, sizeof(float) * 4);
-            
-            // Allocate precomputed splat view data buffer for efficient rendering
-            splatViewData = new ComputeBuffer(splatCount, SPLAT_VIEW_DATA_STRIDE);
-            
-            // Allocate histogram buffers for radix sort
-            // Global histogram: RADIX * RADIX_PASSES entries
-            globalHistogram = new ComputeBuffer(RADIX * RADIX_PASSES, sizeof(uint));
-            
-            // Pass histogram: RADIX * threadBlocks entries
-            // Need to ensure minimum size
-            int passHistSize = Mathf.Max(RADIX * ThreadBlocks, RADIX);
-            passHistogram = new ComputeBuffer(passHistSize, sizeof(uint));
+            EnsureCapacity(splatCount);
+            SetActiveSplatCount(splatCount);
         }
         
         /// <summary>
@@ -116,9 +120,9 @@ namespace GaussianSplatting
             ReleaseBuffer(ref splatViewData);
             ReleaseBuffer(ref globalHistogram);
             ReleaseBuffer(ref passHistogram);
-            ReleaseBuffer(ref sortParams);
             
             SplatCount = 0;
+            allocatedCapacity = 0;
         }
         
         private void ReleaseBuffer(ref ComputeBuffer buffer)

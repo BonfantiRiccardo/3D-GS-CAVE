@@ -733,7 +733,7 @@ namespace GaussianSplatting.Editor
 
             sh[vertexIndex] = new Vector4(sh0, sh1, sh2, alpha);
 
-            // ── SH Rest coefficients ──
+            //  SH Rest coefficients 
             if (layout.RestCount > 0)
             {
                 int restBase = vertexIndex * layout.RestCount;
