@@ -107,7 +107,7 @@ namespace GaussianSplatting.Editor
         /// <summary>
         /// Called when the asset is imported. Creates a ChunkedGSAsset from the PLY file.
         /// Data is spatially sorted and partitioned into chunks, then written to
-        /// external .bytes files in Models/{plyName}/ at the project root.
+        /// external .bytes files in Assets/ByteFiles/{plyName}/ at the project root.
         /// </summary>
         public override void OnImportAsset(AssetImportContext ctx)
         {
@@ -126,9 +126,9 @@ namespace GaussianSplatting.Editor
                 data = PLYParser.Parse(ctx.assetPath);
             }
 
-            // Create external data directory: {ProjectRoot}/Models/{plyName}/
+            // Create external data directory: {ProjectRoot}/Assets/ByteFiles/{plyName}/
             string plyName = Path.GetFileNameWithoutExtension(ctx.assetPath);
-            string relativeDataPath = $"Assets/ByteFiles/" + plyName;
+            string relativeDataPath = "Assets/ByteFiles/" + plyName;
             string projectRoot = Directory.GetParent(Application.dataPath).FullName;
             string absoluteDataPath = Path.Combine(projectRoot,  "Assets", "ByteFiles", plyName);
 
