@@ -9,7 +9,7 @@ namespace GaussianSplatting
     /// <summary>
     /// GSAsset ScriptableObject for storing Gaussian Splatting data.
     /// 
-    /// Data is stored externally as .bytes files in a Assets/ByteFiles/ folder at the project root. (Inspired by github.com/aras-p/UnityGaussianSplatting)
+    /// Data is stored externally as .bytes files in a Assets/StreamingAssets/ folder at the project root. (Inspired by github.com/aras-p/UnityGaussianSplatting)
     /// 
     /// At runtime, data is loaded on-demand from external files and cached.
     /// ComputeBuffers can be populated directly from byte[] via SetData.

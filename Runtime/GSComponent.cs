@@ -180,7 +180,7 @@ namespace GaussianSplatting
 
             if (posData == null || rotData == null || scData == null)
             {
-                Debug.LogError("GSComponent: Essential data missing. Check external .bytes files in Assets/ByteFiles folder.");
+                Debug.LogError("GSComponent: Essential data missing. Check external .bytes files in Assets/StreamingAssets folder.");
                 ReleaseBuffers();
                 return;
             }

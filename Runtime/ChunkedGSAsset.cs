@@ -8,8 +8,8 @@ namespace GaussianSplatting
     /// ChunkedGSAsset stores spatially chunked Gaussian splat data. It supports streaming individual
     /// chunks based on visibility, enabling rendering of very large scenes that exceed GPU memory.
     /// 
-    /// Data is stored externally in the Assets/ByteFiles folder:
-    ///   Assets/ByteFiles/{assetName}/chunks.json      Chunk metadata (bounds, counts, offsets)
+    /// Data is stored externally in the Assets/StreamingAssets folder:
+    ///   Assets/StreamingAssets/{assetName}/chunks.json      Chunk metadata (bounds, counts, offsets)
     ///   /positions.bytes  Position data for all chunks contiguously
     ///   /rotations.bytes  Rotation data for all chunks contiguously
     ///   /scales.bytes     Scale data for all chunks contiguously
