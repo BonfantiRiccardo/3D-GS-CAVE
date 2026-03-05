@@ -35,7 +35,7 @@ namespace GaussianSplatting.Editor
         /// Builds a GSAsset with external data storage. Data files must already be written
         /// to the relativeDataPath folder via WriteExternalData() before calling this.
         /// </summary>
-        public static GSAsset BuildAsset(GSImportData data, string relativeDataPath)
+        public static GSAsset BuildAsset(GSImportData data, string assetFolderName)
         {
             var asset = ScriptableObject.CreateInstance<GSAsset>();
 
@@ -45,7 +45,7 @@ namespace GaussianSplatting.Editor
                 positions.Length,
                 data.SHRestCount,
                 data.Bounds,
-                relativeDataPath);
+                assetFolderName);
 
             return asset;
         }

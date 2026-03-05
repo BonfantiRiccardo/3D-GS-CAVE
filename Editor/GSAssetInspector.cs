@@ -36,7 +36,7 @@ namespace GaussianSplatting.Editor
 
             using (new EditorGUI.DisabledScope(true))
             {
-                EditorGUILayout.TextField("Location", asset.ExternalDataPath ?? "(not set)");
+                EditorGUILayout.TextField("Asset Folder", asset.AssetFolderName ?? "(not set)");
             }
 
             EditorGUILayout.Space();

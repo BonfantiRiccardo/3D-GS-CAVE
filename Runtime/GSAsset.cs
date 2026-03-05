@@ -24,10 +24,10 @@ namespace GaussianSplatting
         [SerializeField, HideInInspector] private int shRestCount;         // number of SH rest coefficients per splat
 
         /// <summary>
-        /// Path to external data folder, relative to the project root.
-        /// Splat data is loaded from .bytes files in this folder.
+        /// Folder name inside StreamingAssets where .bytes files are stored.
+        /// Resolved at runtime via Application.streamingAssetsPath.
         /// </summary>
-        [SerializeField, HideInInspector] private string externalDataPath;
+        [SerializeField, HideInInspector] private string assetFolderName;
 
         // Cached typed arrays: reconstructed on first access from byte data
         [NonSerialized] private Vector3[] _positions;
@@ -54,7 +54,7 @@ namespace GaussianSplatting
         // Metadata accessors (never trigger data loading)
 
         public int SHRestCount => shRestCount;
-        public string ExternalDataPath => externalDataPath;
+        public string AssetFolderName => assetFolderName;
 
         /// <summary>
         /// Estimated total data size in bytes, computed from metadata.
@@ -85,24 +85,23 @@ namespace GaussianSplatting
             int splatCount,
             int shRestCount,
             Bounds bounds,
-            string externalDataPath)
+            string assetFolderName)
         {
             this.splatCount = splatCount;
             this.shRestCount = shRestCount;
             this.bounds = bounds;
-            this.externalDataPath = externalDataPath;
+            this.assetFolderName = assetFolderName;
             ClearCaches();
         }
 
         /// <summary>
-        /// Resolves the project-root-relative externalDataPath to an absolute file path
-        /// for a given data file name.
+        /// Resolves a data file name to an absolute path using Application.streamingAssetsPath.
+        /// Works both in the editor and in builds.
         /// </summary>
         public string ResolveFilePath(string fileName)
         {
-            if (string.IsNullOrEmpty(externalDataPath)) return null;
-            string projectRoot = GetProjectRoot();
-            return Path.Combine(projectRoot, externalDataPath, fileName);
+            if (string.IsNullOrEmpty(assetFolderName)) return null;
+            return Path.Combine(Application.streamingAssetsPath, assetFolderName, fileName);
         }
 
         private void ClearCaches()
@@ -137,11 +136,7 @@ namespace GaussianSplatting
             return null;
         }
 
-        private static string GetProjectRoot()
-        {
-            // Application.dataPath = "{ProjectRoot}/Assets"
-            return Directory.GetParent(Application.dataPath).FullName;
-        }
+
 
         /// <summary>
         /// Reinterpret a byte array as a typed array of blittable structs.

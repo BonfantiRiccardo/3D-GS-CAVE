@@ -126,18 +126,16 @@ namespace GaussianSplatting.Editor
                 data = PLYParser.Parse(ctx.assetPath);
             }
 
-            // Create external data directory: {ProjectRoot}/Assets/StreamingAssets/{plyName}/
+            // Create external data directory: {StreamingAssets}/{plyName}/
             string plyName = Path.GetFileNameWithoutExtension(ctx.assetPath);
-            string relativeDataPath = "Assets/StreamingAssets/" + plyName;
-            string projectRoot = Directory.GetParent(Application.dataPath).FullName;
-            string absoluteDataPath = Path.Combine(projectRoot,  "Assets", "StreamingAssets", plyName);
+            string absoluteDataPath = Path.Combine(Application.streamingAssetsPath, plyName);
 
             // Use the chunked pipeline: sort spatially, partition, and write
             progress.Report(0.5f);
             var (asset, chunks) = ChunkedGSAssetBuilder.ProcessAndBuild(
                 data,
                 absoluteDataPath,
-                relativeDataPath,
+                plyName,
                 m_ChunkSize);
 
             asset.name = plyName;

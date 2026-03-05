@@ -56,7 +56,7 @@ namespace GaussianSplatting.Editor
             GSImportData data,
             ChunkInfo[] chunks,
             int chunkSize,
-            string relativeDataPath)
+            string assetFolderName)
         {
             var asset = ScriptableObject.CreateInstance<ChunkedGSAsset>();
 
@@ -68,7 +68,7 @@ namespace GaussianSplatting.Editor
                 shRestCount: data.SHRestCount,
                 globalBounds: data.Bounds,
                 chunks: chunks,
-                externalDataPath: relativeDataPath);
+                assetFolderName: assetFolderName);
 
             return asset;
         }
@@ -79,7 +79,7 @@ namespace GaussianSplatting.Editor
         public static (ChunkedGSAsset asset, ChunkInfo[] chunks) ProcessAndBuild(
             GSImportData data,
             string absoluteDataPath,
-            string relativeDataPath,
+            string assetFolderName,
             int chunkSize = SpatialSorter.DefaultChunkSize,
             IProgress<float> progress = null)
         {
@@ -96,7 +96,7 @@ namespace GaussianSplatting.Editor
 
             // Step 3: Build the asset
             progress?.Report(0.9f);
-            ChunkedGSAsset asset = BuildAsset(data, chunks, chunkSize, relativeDataPath);
+            ChunkedGSAsset asset = BuildAsset(data, chunks, chunkSize, assetFolderName);
 
             progress?.Report(1f);
             return (asset, chunks);

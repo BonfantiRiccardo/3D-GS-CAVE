@@ -8,13 +8,15 @@ namespace GaussianSplatting
     /// ChunkedGSAsset stores spatially chunked Gaussian splat data. It supports streaming individual
     /// chunks based on visibility, enabling rendering of very large scenes that exceed GPU memory.
     /// 
-    /// Data is stored externally in the Assets/StreamingAssets folder:
-    ///   Assets/StreamingAssets/{assetName}/chunks.json      Chunk metadata (bounds, counts, offsets)
-    ///   /positions.bytes  Position data for all chunks contiguously
-    ///   /rotations.bytes  Rotation data for all chunks contiguously
-    ///   /scales.bytes     Scale data for all chunks contiguously
-    ///   /sh.bytes         SH DC data for all chunks contiguously
-    ///   /shrest.bytes     SH rest data for all chunks contiguously
+    /// Data is stored externally in the StreamingAssets folder:
+    ///   {StreamingAssets}/{assetName}/positions.bytes  Position data for all chunks contiguously
+    ///   {StreamingAssets}/{assetName}/rotations.bytes  Rotation data for all chunks contiguously
+    ///   {StreamingAssets}/{assetName}/scales.bytes     Scale data for all chunks contiguously
+    ///   {StreamingAssets}/{assetName}/sh.bytes         SH DC data for all chunks contiguously
+    ///   {StreamingAssets}/{assetName}/shrest.bytes     SH rest data for all chunks contiguously
+    /// 
+    /// Chunk metadata (bounds, counts, offsets) is serialized directly in this ScriptableObject
+    /// via the ChunkInfo[] array, not stored externally.
     /// 
     /// Chunks are spatially sorted using Morton codes so that each chunk contains
     /// nearby splats. This enables efficient frustum culling at the chunk level.
@@ -41,15 +43,15 @@ namespace GaussianSplatting
         private int shRestCount;
 
         [Header("Data Location")]
+        [Tooltip("Folder name inside StreamingAssets where .bytes files are stored")]
         [SerializeField, HideInInspector] 
-        private string externalDataPath;
+        private string assetFolderName;
 
         // Chunk metadata array (serialized in the asset for fast access)
         [SerializeField, HideInInspector]
         private ChunkInfo[] chunks;
 
         // File names for external data
-        public const string ChunkMetadataFileName = "chunks.json";
         public const string PositionsFileName = "positions.bytes";
         public const string RotationsFileName = "rotations.bytes";
         public const string ScalesFileName = "scales.bytes";
@@ -64,7 +66,7 @@ namespace GaussianSplatting
 
         // Public accessors
         public int SHRestCount => shRestCount;
-        public string ExternalDataPath => externalDataPath;
+        public string AssetFolderName => assetFolderName;
         public ChunkInfo[] Chunks => chunks;
         public int SHRestStride => shRestCount * sizeof(float);
 
@@ -91,7 +93,7 @@ namespace GaussianSplatting
             int shRestCount,
             Bounds globalBounds,
             ChunkInfo[] chunks,
-            string externalDataPath)
+            string assetFolderName)
         {
             this.totalSplatCount = totalSplatCount;
             this.chunkSize = chunkSize;
@@ -99,17 +101,17 @@ namespace GaussianSplatting
             this.globalBounds = globalBounds;
             this.chunks = chunks;
             this.chunkCount = chunks?.Length ?? 0;
-            this.externalDataPath = externalDataPath;
+            this.assetFolderName = assetFolderName;
         }
 
         /// <summary>
-        /// Resolves the external data path to an absolute file path for a given filename.
+        /// Resolves a data file name to an absolute path using Application.streamingAssetsPath.
+        /// Works both in the editor and in builds.
         /// </summary>
         public string ResolveFilePath(string fileName)
         {
-            if (string.IsNullOrEmpty(externalDataPath)) return null;
-            string projectRoot = GetProjectRoot();
-            return Path.Combine(projectRoot, externalDataPath, fileName);
+            if (string.IsNullOrEmpty(assetFolderName)) return null;
+            return Path.Combine(Application.streamingAssetsPath, assetFolderName, fileName);
         }
 
         /// <summary>
@@ -271,10 +273,6 @@ namespace GaussianSplatting
             return combinedData;
         }
 
-        private static string GetProjectRoot()
-        {
-            // Application.dataPath = "{ProjectRoot}/Assets"
-            return Directory.GetParent(Application.dataPath).FullName;
-        }
+
     }
 }

@@ -20,6 +20,9 @@ namespace GaussianSplatting
         [SerializeField] private ChunkedGSRenderSettings settings = new();
         private ChunkedGSRenderPass renderPass;
 
+        // Track the material we create so we can clean it up on dispose
+        private Material ownedMaterial;
+
         public override void Create()
         {
             if (settings == null)
@@ -32,7 +35,9 @@ namespace GaussianSplatting
                 Shader shader = Shader.Find(ChunkedGSRenderSettings.DefaultShaderName);
                 if (shader != null)
                 {
-                    settings.splatMaterial = new Material(shader) { hideFlags = HideFlags.HideAndDontSave };
+                    var mat = new Material(shader) { hideFlags = HideFlags.HideAndDontSave };
+                    settings.splatMaterial = mat;
+                    ownedMaterial = mat;
                 }
             }
 
@@ -57,6 +62,20 @@ namespace GaussianSplatting
             }
 
             renderer.EnqueuePass(renderPass);
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            // Clean up the Material we created with HideAndDontSave to prevent
+            // persistent allocation leaks across domain reloads.
+            if (ownedMaterial != null)
+            {
+                if (Application.isPlaying)
+                    Destroy(ownedMaterial);
+                else
+                    DestroyImmediate(ownedMaterial);
+                ownedMaterial = null;
+            }
         }
 
         [Serializable]

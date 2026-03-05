@@ -78,7 +78,7 @@ namespace GaussianSplatting
         private readonly float loadMargin;
         private readonly float unloadMargin;
         private readonly int evictionDelayFrames;
-        private readonly int maxUploadsPerFrame;
+        private readonly int maxUploadsPerFrame;  // GPU SetData calls per frame (does NOT limit async dispatch)
 
         // GPU pool buffers (allocated once, never reallocated)
         private ComputeBuffer positionBuffer;
@@ -282,6 +282,26 @@ namespace GaussianSplatting
 
         public void Dispose()
         {
+            Dispose(true);
+            GC.SuppressFinalize(this);
+        }
+
+        ~GSChunkStreamer()
+        {
+            // Destructor: only stop the I/O thread. ComputeBuffer.Release() must
+            // happen on the main thread so we cannot call it from the finalizer.
+            // If we reach here it means Dispose() was not called -- log a warning.
+            if (ioThreadRunning)
+            {
+                ioThreadRunning = false;
+                ioWakeEvent?.Set();
+            }
+        }
+
+        private void Dispose(bool disposing)
+        {
+            if (!disposing) return;
+
             // Shut down I/O thread
             ioThreadRunning = false;
             ioWakeEvent?.Set();
@@ -497,7 +517,6 @@ namespace GaussianSplatting
                 int idx = innerVisibleList[i];
                 if (chunks[idx].state != SlotState.Unloaded) continue;
                 if (available <= 0) break;
-                if (toLoadList.Count >= maxUploadsPerFrame) break;
 
                 toLoadList.Add(idx);
                 available--;

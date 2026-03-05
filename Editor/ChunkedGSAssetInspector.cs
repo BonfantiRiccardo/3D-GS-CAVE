@@ -56,7 +56,7 @@ namespace GaussianSplatting.Editor
             EditorGUILayout.Space(5);
 
             // External data path
-            EditorGUILayout.LabelField("Data Path", asset.ExternalDataPath);
+            EditorGUILayout.LabelField("Asset Folder", asset.AssetFolderName);
 
             EditorGUI.indentLevel--;
 

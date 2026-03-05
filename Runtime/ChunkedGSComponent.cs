@@ -39,11 +39,11 @@ namespace GaussianSplatting
         [Range(0, 300)]
         public int evictionDelayFrames = 60;
 
-        [Tooltip("Maximum number of chunk GPU uploads per frame. " +
-                 "Lower values spread I/O cost across more frames preventing freezes. " +
-                 "Higher values reduce pop in but cost more per frame.")]
-        [Range(1, 64)]
-        public int maxUploadsPerFrame = 8;
+        [Tooltip("Maximum number of chunk GPU uploads (SetData calls) per frame. " +
+                 "Async I/O dispatch is unlimited so the background thread reads ahead. " +
+                 "Higher values reduce pop-in but cost more per frame.")]
+        [Range(1, 256)]
+        public int maxUploadsPerFrame = 128;
 
         [Header("Rendering")]
         [Tooltip("Color space conversion mode for splat colors.\n" +
@@ -178,6 +178,13 @@ namespace GaussianSplatting
         {
             DisposeStreamer();
             ChunkedGSManager.Unregister(this);
+        }
+
+        void OnApplicationQuit()
+        {
+            // Belt-and-suspenders: ensure GPU resources are released even if
+            // OnDisable is skipped during an abrupt quit.
+            DisposeStreamer();
         }
 
         void OnValidate()
