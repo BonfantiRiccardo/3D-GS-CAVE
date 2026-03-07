@@ -7,8 +7,8 @@ namespace GaussianSplatting
     /// ChunkedGSComponent manages spatially chunked Gaussian Splatting data with frustum based streaming. 
     /// This component only loads chunks that are visible to the camera, enabling rendering of very large scenes.
     /// 
-    /// It performs frustum culling at chunk level (typically 4096 splats per chunk) and dynamic loading and 
-    /// unloading based on camera movement. Implements margin delta for preloading chunks slightly outside the frustum
+    /// It performs frustum culling at chunk level and dynamic loading/unloading based on camera movement. 
+    /// Implements margin delta for preloading chunks slightly outside the frustum
     /// </summary>
     [ExecuteAlways]
     public class ChunkedGSComponent : MonoBehaviour
@@ -38,12 +38,6 @@ namespace GaussianSplatting
                  "Higher values reduce costly repacks at the cost of extra GPU memory.")]
         [Range(0, 300)]
         public int evictionDelayFrames = 60;
-
-        [Tooltip("Maximum number of chunk GPU uploads (SetData calls) per frame. " +
-                 "Async I/O dispatch is unlimited so the background thread reads ahead. " +
-                 "Higher values reduce pop-in but cost more per frame.")]
-        [Range(1, 256)]
-        public int maxUploadsPerFrame = 128;
 
         [Header("Rendering")]
         [Tooltip("Color space conversion mode for splat colors.\n" +
@@ -234,7 +228,7 @@ namespace GaussianSplatting
                 return;
             }
 
-            streamer = new GSChunkStreamer(asset, maxVisibleSplats, frustumMargin, unloadMargin, evictionDelayFrames, maxUploadsPerFrame);
+            streamer = new GSChunkStreamer(asset, maxVisibleSplats, frustumMargin, unloadMargin, evictionDelayFrames);
 
             // Pre allocate sort resources at pool capacity so they are never
             // reallocated during rendering when the active splat count changes.

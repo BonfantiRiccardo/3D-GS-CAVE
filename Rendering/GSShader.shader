@@ -176,20 +176,6 @@ Shader "GaussianSplatting/GSShader"
 
                 // Output premultiplied alpha for correct compositing
                 return half4(input.color.rgb * alpha, alpha);
-
-                // Debug: red color by sorted index
-                //return half4(input.splatIndex/(float(_SplatCount)),0,0,1);
-
-                //Debug: only draw the splat centers
-                //if (length(input.uv) > 0.02)
-                //    discard;
-
-                //return half4(1,0,0,1);
-
-                /*
-                // Debug
-                float alpha = 1.0; // Force opaque
-                return half4(input.color.rgb, alpha);*/
             }
             ENDHLSL
         }
