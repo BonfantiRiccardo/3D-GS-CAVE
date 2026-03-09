@@ -45,6 +45,16 @@ namespace GaussianSplatting
                 }
             }
 
+            // Load precompute compute shader if not already assigned
+            if (settings.precomputeShader == null)
+            {
+                settings.precomputeShader = Resources.Load<ComputeShader>("GSPrecompute");
+                if (settings.precomputeShader == null)
+                {
+                    settings.precomputeShader = (ComputeShader)UnityEngine.Resources.Load("GaussianSplatting/Rendering/GSPrecompute");
+                }
+            }
+
             // Create the render pass with the provided settings
             renderPass = new GSRenderPass(settings);
             // Configures where the render pass should be injected.
@@ -93,6 +103,9 @@ namespace GaussianSplatting
             [Header("Sorting")]
             // Gaussian Splatting requires back-to-front rendering for correct alpha blending (alpha compositing is not commutative)
             public ComputeShader sortingShader; // GSSorting.compute
+
+            [Header("Precompute")]
+            public ComputeShader precomputeShader; // GSPrecompute.compute
         }
 
         /// <summary>
@@ -178,6 +191,7 @@ namespace GaussianSplatting
             private class SortPassData
             {
                 public ComputeShader sortingShader;
+                public ComputeShader precomputeShader;
                 public Matrix4x4 viewMatrix;
                 public Matrix4x4 projMatrix;
                 public Vector4 screenParams;
@@ -193,20 +207,23 @@ namespace GaussianSplatting
                 public float[] debugPointSizes;     // Per-component debug point size
             }
 
+            // Sorting shader kernels
             private static int kernelInitSortBuffers = -1;
             private static int kernelCalcViewData = -1;
             private static int kernelCalcSortKeys = -1;
-            private static int kernelCalcSplatViewData = -1;
             private static int kernelInitRadix = -1;
             private static int kernelUpsweep = -1;
             private static int kernelScan = -1;
             private static int kernelDownsweep = -1;
 
+            // Precompute shader kernel
+            private static int kernelCalcSplatViewData = -1;
+
             /// <summary>
             /// Ensures that the compute shader kernels are initialized.
             /// <param name="shader">The compute shader containing the kernels.</param>
             /// </summary>
-            private static void EnsureKernels(ComputeShader shader)
+            private static void EnsureSortKernels(ComputeShader shader)
             {
                 if (shader == null) return;
                 if (kernelInitSortBuffers >= 0) return;
@@ -214,11 +231,18 @@ namespace GaussianSplatting
                 kernelInitSortBuffers = shader.FindKernel("InitSortBuffers");
                 kernelCalcViewData = shader.FindKernel("CalcViewData");
                 kernelCalcSortKeys = shader.FindKernel("CalcSortKeys");
-                kernelCalcSplatViewData = shader.FindKernel("CalcSplatViewData");
                 kernelInitRadix = shader.FindKernel("InitDeviceRadixSort");
                 kernelUpsweep = shader.FindKernel("Upsweep");
                 kernelScan = shader.FindKernel("Scan");
                 kernelDownsweep = shader.FindKernel("Downsweep");
+            }
+
+            private static void EnsurePrecomputeKernels(ComputeShader shader)
+            {
+                if (shader == null) return;
+                if (kernelCalcSplatViewData >= 0) return;
+
+                kernelCalcSplatViewData = shader.FindKernel("CalcSplatViewData");
             }
 
             /// <summary>
@@ -229,12 +253,13 @@ namespace GaussianSplatting
             /// <param name="context">The compute graph context for dispatching compute shaders.</param>
             private static void ExecuteSortPass(SortPassData data, ComputeGraphContext context)
             {
-                if (data.sortingShader == null || data.components == null || data.components.Length == 0)
+                if (data.sortingShader == null || data.components == null || data.components.Length == 0 || data.precomputeShader == null)
                 {
                     return;
                 }
 
-                EnsureKernels(data.sortingShader);
+                EnsureSortKernels(data.sortingShader);
+                EnsurePrecomputeKernels(data.precomputeShader);
 
                 for (int i = 0; i < data.components.Length; i++)
                 {
@@ -305,37 +330,47 @@ namespace GaussianSplatting
                         }
                     }
                     
-                    // Compute per-splat view data (clip pos, ellipse axes, color)
-                    // Also precomputes all expensive per-splat data so vertex shader only does quad expansion
-                    context.cmd.SetComputeVectorParam(data.sortingShader, "_VecScreenParams", data.screenParams);
-                    // Use per-component splat scale (from GSComponent slider) multiplied by global setting
+                    // Dispatch CalcSplatViewData on the precompute shader
+                    var pc = data.precomputeShader;
+
+                    // Shared uniforms
+                    context.cmd.SetComputeMatrixParam(pc, "_MatrixV", data.viewMatrix);
+                    context.cmd.SetComputeMatrixParam(pc, "_MatrixP", data.projMatrix);
+                    context.cmd.SetComputeVectorParam(pc, "_VecScreenParams", data.screenParams);
+                    context.cmd.SetComputeIntParam(pc, "_SplatCount", splatCount);
+                    context.cmd.SetComputeIntParam(pc, "_UseRemap", 0);
+
+                    // Model transform
+                    context.cmd.SetComputeVectorParam(pc, "_ModelPosition", component.modelPosition);
+                    Quaternion pcRot = component.ModelRotation;
+                    context.cmd.SetComputeVectorParam(pc, "_ModelRotation", new Vector4(pcRot.x, pcRot.y, pcRot.z, pcRot.w));
+                    context.cmd.SetComputeVectorParam(pc, "_ModelScale", component.modelScale);
+
+                    // Precompute-specific uniforms
                     float effectiveSplatScale = data.splatSize * (data.splatScales != null && i < data.splatScales.Length ? data.splatScales[i] : 1.0f);
-                    context.cmd.SetComputeFloatParam(data.sortingShader, "_SplatScale", effectiveSplatScale);
-                    context.cmd.SetComputeVectorParam(data.sortingShader, "_CameraWorldPos", data.cameraWorldPos);
-                    context.cmd.SetComputeIntParam(data.sortingShader, "_SHBands", component.ShBandsNumber);
-                    context.cmd.SetComputeIntParam(data.sortingShader, "_SHRestCount", component.gsAsset != null ? component.gsAsset.SHRestCount : 0);
-                    // Color space mode from GSComponent
+                    context.cmd.SetComputeFloatParam(pc, "_SplatScale", effectiveSplatScale);
+                    context.cmd.SetComputeVectorParam(pc, "_CameraWorldPos", data.cameraWorldPos);
+                    context.cmd.SetComputeIntParam(pc, "_SHBands", component.ShBandsNumber);
+                    context.cmd.SetComputeIntParam(pc, "_SHRestCount", component.gsAsset != null ? component.gsAsset.SHRestCount : 0);
                     int csMode = (data.colorSpaceModes != null && i < data.colorSpaceModes.Length) ? data.colorSpaceModes[i] : 0;
-                    context.cmd.SetComputeIntParam(data.sortingShader, "_ColorSpaceMode", csMode);
-                    // Debug points mode
+                    context.cmd.SetComputeIntParam(pc, "_ColorSpaceMode", csMode);
                     bool debugPts = data.debugPoints != null && i < data.debugPoints.Length && data.debugPoints[i];
-                    context.cmd.SetComputeIntParam(data.sortingShader, "_DebugPoints", debugPts ? 1 : 0);
+                    context.cmd.SetComputeIntParam(pc, "_DebugPoints", debugPts ? 1 : 0);
                     float debugPtSize = data.debugPointSizes != null && i < data.debugPointSizes.Length ? data.debugPointSizes[i] : 3.0f;
-                    context.cmd.SetComputeFloatParam(data.sortingShader, "_DebugPointSize", debugPtSize);
-                    
-                    // Compute combined model-view matrix
-                    Matrix4x4 matrixMV = data.viewMatrix; // Model is identity since we apply model transform in shader
-                    context.cmd.SetComputeMatrixParam(data.sortingShader, "_MatrixMV", matrixMV);
-                    
-                    // Bind SH buffers for view-dependent color
-                    component.BindToCompute(context.cmd, data.sortingShader, kernelCalcSplatViewData);
+                    context.cmd.SetComputeFloatParam(pc, "_DebugPointSize", debugPtSize);
+
+                    Matrix4x4 matrixMV = data.viewMatrix;
+                    context.cmd.SetComputeMatrixParam(pc, "_MatrixMV", matrixMV);
+
+                    // Bind splat data buffers
+                    component.BindToCompute(context.cmd, pc, kernelCalcSplatViewData);
                     if (component.SHBuffer != null)
-                        context.cmd.SetComputeBufferParam(data.sortingShader, kernelCalcSplatViewData, "_SH", component.SHBuffer);
+                        context.cmd.SetComputeBufferParam(pc, kernelCalcSplatViewData, "_SH", component.SHBuffer);
                     if (component.SHRestBuffer != null)
-                        context.cmd.SetComputeBufferParam(data.sortingShader, kernelCalcSplatViewData, "_SHRest", component.SHRestBuffer);
-                    
-                    resources.BindSplatViewDataOutput(context.cmd, data.sortingShader, kernelCalcSplatViewData);
-                    context.cmd.DispatchCompute(data.sortingShader, kernelCalcSplatViewData, groups, 1, 1);
+                        context.cmd.SetComputeBufferParam(pc, kernelCalcSplatViewData, "_SHRest", component.SHRestBuffer);
+
+                    resources.BindSplatViewDataOutput(context.cmd, pc, kernelCalcSplatViewData);
+                    context.cmd.DispatchCompute(pc, kernelCalcSplatViewData, groups, 1, 1);                    
                 }
             }
 
@@ -402,7 +437,7 @@ namespace GaussianSplatting
                 var components = GSManager.Components;
                 if (components == null || components.Count == 0)
                 {
-                    Debug.LogWarning("No GSComponents registered in GSManager.");
+                    //Debug.LogWarning("No GSComponents registered in GSManager.");
                 }
 
                 // Use this scope to set the required inputs and outputs of the pass and to
@@ -432,6 +467,7 @@ namespace GaussianSplatting
                         sortBuilder.AllowPassCulling(false);
 
                         sortPassData.sortingShader = settings.sortingShader;
+                        sortPassData.precomputeShader = settings.precomputeShader;
                         sortPassData.viewMatrix = viewMatrix;
                         sortPassData.projMatrix = projMatrix;
                         sortPassData.screenParams = new Vector4(cameraData.camera.pixelWidth, cameraData.camera.pixelHeight,

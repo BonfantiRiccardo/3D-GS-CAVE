@@ -19,6 +19,7 @@ MonoBehaviour:
     splatMaterial: {fileID: 2100000, guid: 6dd8e28c8c9fb594f84c2c3b3782b92f, type: 2}
     splatSize: 1
     sortingShader: {fileID: 7200000, guid: cf0d2e07c0f4e5748aefed56388f94ac, type: 3}
+    precomputeShader: {fileID: 7200000, guid: 1fc3bd71a17cb2b4d82ec568f77aa8e1, type: 3}
 --- !u!114 &11400000
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -96,3 +97,4 @@ MonoBehaviour:
     splatMaterial: {fileID: 2100000, guid: 6dd8e28c8c9fb594f84c2c3b3782b92f, type: 2}
     splatSize: 1
     sortingShader: {fileID: 7200000, guid: cf0d2e07c0f4e5748aefed56388f94ac, type: 3}
+    precomputeShader: {fileID: 7200000, guid: 1fc3bd71a17cb2b4d82ec568f77aa8e1, type: 3}

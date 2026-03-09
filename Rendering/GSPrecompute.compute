@@ -1,0 +1,171 @@
+// Compute shader for precomputing per-splat view data for efficient rendering.
+// This shader handles rendering data (clip position, 2D ellipse axes, view-dependent color).
+
+#pragma kernel CalcSplatViewData
+
+#define GROUP_SIZE 256
+
+#pragma use_dxc
+
+#include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
+#include "GSUtils.hlsl"
+
+// SplatViewData structure for precomputed per-splat rendering data
+// Must match the struct in GSSorting.compute and the C# stride constant
+struct SplatViewData
+{
+    float4 pos;             // Clip-space position (xyz + w for perspective divide)
+    float2 axis1;           // First ellipse axis (in pixels, includes radius)
+    float2 axis2;           // Second ellipse axis (in pixels, includes radius)
+    uint2 color;            // Packed FP16 color: x = (r << 16) | g, y = (b << 16) | a
+};
+
+// Input buffers (same as GSSorting.compute — bound from same pool)
+StructuredBuffer<float3> _Positions;        // World-space splat positions
+StructuredBuffer<float4> _Rotations;        // Splat rotations (quaternions)
+StructuredBuffer<float3> _Scales;           // Splat scales
+StructuredBuffer<float4> _SH;               // SH DC color (rgb) + opacity (a)
+StructuredBuffer<float> _SHRest;            // Higher SH bands coefficients
+
+// Precomputed splat view data output (for efficient rendering)
+RWStructuredBuffer<SplatViewData> _SplatViewData;
+
+// Indirection buffer for slot pool based streaming.
+uint _UseRemap;
+StructuredBuffer<uint> _SplatRemap;
+
+uint GetPhysicalIndex(uint logicalIdx)
+{
+    if (_UseRemap)
+        return _SplatRemap[logicalIdx];
+    return logicalIdx;
+}
+
+// Uniforms (same names as GSSorting.compute for shared C# binding)
+float4x4 _MatrixV;          // View matrix
+float4x4 _MatrixP;          // Projection matrix
+float4x4 _MatrixMV;         // Combined Model-View matrix
+float4 _VecScreenParams;    // x = width, y = height, z = 1/width, w = 1/height
+uint _SplatCount;            // Total number of splats
+float _SplatScale;           // Global splat scale multiplier
+int _SHBands;                // Number of SH bands (0-3)
+int _SHRestCount;            // Number of SH rest floats per splat
+float3 _CameraWorldPos;     // Camera world position for view-dependent SH
+int _ColorSpaceMode;         // 0 = Auto (use Unity setting), 1 = ForceLinear, 2 = ForceGamma
+int _DebugPoints;            // 1 = render as uniform billboard points, 0 = normal splat rendering
+float _DebugPointSize;       // Size of debug points in pixels
+
+// Model transform
+float3 _ModelPosition;
+float4 _ModelRotation;
+float3 _ModelScale;
+
+
+// CalcSplatViewData - Precompute all per-splat view data for efficient rendering
+// This kernel processes each splat by its ORIGINAL index (not sorted)
+// The shader uses _OrderBuffer to lookup sorted rendering order
+[numthreads(GROUP_SIZE, 1, 1)]
+void CalcSplatViewData(uint3 id : SV_DispatchThreadID)
+{
+    uint idx = id.x;
+    if (idx >= _SplatCount)
+        return;
+    
+    // Initialize output
+    SplatViewData view = (SplatViewData)0;
+    
+    // Load splat data using physical index from indirection buffer
+    uint physIdx = GetPhysicalIndex(idx);
+    float3 localPos = _Positions[physIdx];
+    float4 localQuat = _Rotations[physIdx];
+    float3 localScale = _Scales[physIdx];
+    float4 shColor = _SH[physIdx];
+    
+    // Apply model transform
+    float3 worldPos = TransformPosition(localPos, _ModelPosition, _ModelRotation, _ModelScale);
+    float4 worldQuat = TransformRotation(localQuat, _ModelRotation);
+    float3 worldScale = localScale * _ModelScale * _SplatScale;
+    
+    // Transform to clip space.
+    float4 viewPos4 = mul(_MatrixV, float4(worldPos, 1.0));
+    float4 clipPos = mul(_MatrixP, viewPos4);
+    
+    // Check if behind camera (cull)
+    if (clipPos.w <= 0)
+    {
+        view.pos = float4(0, 0, 0, 0);  // Mark as culled
+        _SplatViewData[idx] = view;
+        return;
+    }
+    
+    view.pos = clipPos;
+    
+    // Compute view direction for SH evaluation (needed for both modes)
+    float3 viewDir = normalize(_CameraWorldPos - worldPos);
+    
+    // Evaluate spherical harmonics for view-dependent color
+    float3 rgb;
+    if (_SHBands > 0 && _SHRestCount > 0)
+    {
+        rgb = EvaluateSH(shColor.rgb, _SHRest, _SHRestCount, physIdx, viewDir, _SHBands);
+    }
+    else
+    {
+        rgb = SHToColor(shColor.rgb);
+    }
+    
+    // Convert to linear color space based on mode
+    // 0 = Auto: use Unity's color space setting
+    // 1 = ForceLinear: always convert
+    // 2 = ForceGamma: never convert
+    bool convertToLinear = false;
+    if (_ColorSpaceMode == 1)
+        convertToLinear = true;
+    else if (_ColorSpaceMode == 0)
+    {
+        #ifndef UNITY_COLORSPACE_GAMMA
+            convertToLinear = true;
+        #endif
+    }
+    if (convertToLinear)
+        rgb = GammaToLinear(rgb);
+    
+    // Pack color as FP16
+    // x = (r_fp16 << 16) | g_fp16, y = (b_fp16 << 16) | a_fp16
+    view.color.x = (f32tof16(rgb.r) << 16) | f32tof16(rgb.g);
+    view.color.y = (f32tof16(rgb.b) << 16) | f32tof16(shColor.a);
+    
+    // Debug points mode: skip covariance, use uniform-size billboard axes
+    if (_DebugPoints)
+    {
+        float pointRadius = _DebugPointSize * 0.5;
+        view.axis1 = float2(pointRadius, 0);
+        view.axis2 = float2(0, pointRadius);
+        _SplatViewData[idx] = view;
+        return;
+    }
+    
+    // Normal splat mode: compute 3D covariance and project to 2D ellipse
+    float3 covA, covB;
+    ComputeCovariance3D(worldQuat, worldScale, covA, covB);
+    
+    // Project to 2D covariance
+    float3 cov2D = CalcCovariance2D(worldPos, covA, covB, _MatrixMV, _MatrixP, _VecScreenParams);
+    
+    // Decompose covariance to ellipse axes
+    float diag1 = cov2D.x, diag2 = cov2D.z, offDiag = cov2D.y;
+    float mid = 0.5 * (diag1 + diag2);
+    float radius = length(float2((diag1 - diag2) * 0.5, offDiag));
+    float lambda1 = mid + radius;
+    float lambda2 = max(mid - radius, 0.1);
+    
+    float2 diagVec = normalize(float2(offDiag, lambda1 - diag1 + 1e-6));
+    diagVec.y = -diagVec.y;
+    
+    // Scale axes by sqrt(2 * eigenvalue) and cap at reasonable max size
+    float maxSize = 4096.0;
+    view.axis1 = min(sqrt(2.0 * lambda1), maxSize) * diagVec;
+    view.axis2 = min(sqrt(2.0 * lambda2), maxSize) * float2(diagVec.y, -diagVec.x);
+    
+    _SplatViewData[idx] = view;
+}

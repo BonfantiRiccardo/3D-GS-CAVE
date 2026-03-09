@@ -1,10 +1,9 @@
-// GSSorting.compute
-// Compute shader for depth-based Gaussian Splatting sorting and view data computation
+// Compute shader for depth-based Gaussian Splatting sorting
 // This shader handles:
 // 1. Computing view-space depth for each splat
 // 2. Culling splats outside the view frustum
 // 3. Preparing depth-based sort keys for back-to-front rendering
-// 4. Precomputing per-splat view data (clip position, ellipse axes, color) for efficient rendering
+// 4. Full radix sort and incremental odd-even repair sort
 //
 // The actual radix sort kernels are provided by ThirdParty/DeviceRadixSort.hlsl
 // We only define the preprocessing kernels here.
@@ -12,11 +11,14 @@
 #pragma kernel InitSortBuffers
 #pragma kernel CalcViewData
 #pragma kernel CalcSortKeys
-#pragma kernel CalcSplatViewData
+
 #pragma kernel InitDeviceRadixSort
 #pragma kernel Upsweep
 #pragma kernel Scan
 #pragma kernel Downsweep
+
+#pragma kernel UpdateSortKeysInPlace
+#pragma kernel OddEvenPass
 
 #define GROUP_SIZE 256
 
@@ -35,32 +37,15 @@
 #include "../ThirdParty/DeviceRadixSort.hlsl"
 #include "GSUtils.hlsl"
 
-// SplatViewData structure for precomputed per-splat rendering data
-// This reduces work in the vertex shader
-struct SplatViewData
-{
-    float4 pos;             // Clip-space position (xyz + w for perspective divide)
-    float2 axis1;           // First ellipse axis (in pixels, includes radius)
-    float2 axis2;           // Second ellipse axis (in pixels, includes radius)
-    uint2 color;            // Packed FP16 color: x = (r << 16) | g, y = (b << 16) | a
-};
-
-// Input buffers (from GSComponent)
+// Input buffer (from GSComponent / ChunkedGSComponent pool)
 StructuredBuffer<float3> _Positions;        // World-space splat positions
-StructuredBuffer<float4> _Rotations;        // Splat rotations (quaternions)
-StructuredBuffer<float3> _Scales;           // Splat scales
-StructuredBuffer<float4> _SH;               // SH DC color (rgb) + opacity (a)
-StructuredBuffer<float> _SHRest;            // Higher SH bands coefficients
 
-// View-space data output (for culling and tile assignment)
+// View-space data output (for culling and sort key computation)
 RWStructuredBuffer<float4> _ViewData;       // xyz = view pos, w = visible (1) or culled (0)
-
-// Precomputed splat view data output (for efficient rendering)
-RWStructuredBuffer<SplatViewData> _SplatViewData;
 
 // Indirection buffer for slot pool based streaming.
 // Maps logical splat index [0, _SplatCount) to physical index in the pool buffers.
-// Assing _UseRemap == 0 to bypass remapping.
+// Set _UseRemap == 0 to bypass remapping.
 uint _UseRemap;
 StructuredBuffer<uint> _SplatRemap;
 
@@ -75,18 +60,9 @@ uint GetPhysicalIndex(uint logicalIdx)
 // Uniforms
 float4x4 _MatrixV;          // View matrix
 float4x4 _MatrixP;          // Projection matrix
-float4x4 _MatrixMV;         // Combined Model-View matrix
-float4 _VecScreenParams;    // x = width, y = height, z = 1/width, w = 1/height
-uint _SplatCount;           // Total number of splats
-float _NearPlane;           // Camera near plane
-float _FarPlane;            // Camera far plane
-float _SplatScale;          // Global splat scale multiplier
-int _SHBands;               // Number of SH bands (0-3)
-int _SHRestCount;           // Number of SH rest floats per splat
-float3 _CameraWorldPos;     // Camera world position for view-dependent SH
-int _ColorSpaceMode;        // 0 = Auto (use Unity setting), 1 = ForceLinear, 2 = ForceGamma
-int _DebugPoints;           // 1 = render as uniform billboard points, 0 = normal splat rendering
-float _DebugPointSize;      // Size of debug points in pixels
+uint _SplatCount;            // Total number of splats
+float _NearPlane;            // Camera near plane
+float _FarPlane;             // Camera far plane
 
 // Model transform (must match shader)
 float3 _ModelPosition;      // Model position offset
@@ -208,113 +184,88 @@ void CalcSortKeys(uint3 id : SV_DispatchThreadID)
     b_sort[idx] = sortKey;
 }
 
-// CalcSplatViewData - Precompute all per-splat view data for efficient rendering
-// This kernel processes each splat by its ORIGINAL index (not sorted)
-// The shader uses _OrderBuffer to lookup sorted rendering order
+
+// This kernel recomputes depth keys for whatever index order is currently in b_sortPayload[]. 
+// The existing sort order is preserved (only keys are updated().
+// After this, a few OddEvenPass dispatches fix any local inversions.
 [numthreads(GROUP_SIZE, 1, 1)]
-void CalcSplatViewData(uint3 id : SV_DispatchThreadID)
+void UpdateSortKeysInPlace(uint3 id : SV_DispatchThreadID)
 {
     uint idx = id.x;
     if (idx >= _SplatCount)
         return;
     
-    // Initialize output
-    SplatViewData view = (SplatViewData)0;
+    // Get the splat index that is currently at sort position [idx]
+    uint splatIdx = b_sortPayload[idx];
     
-    // Load splat data using physical index from indirection buffer
-    uint physIdx = GetPhysicalIndex(idx);
-    float3 localPos = _Positions[physIdx];
-    float4 localQuat = _Rotations[physIdx];
-    float3 localScale = _Scales[physIdx];
-    float4 shColor = _SH[physIdx];
+    // Get its local position via indirection (physical index in pool buffer)
+    float3 localPos = _Positions[GetPhysicalIndex(splatIdx)];
     
-    // Apply model transform
-    float3 worldPos = TransformPosition(localPos, _ModelPosition, _ModelRotation, _ModelScale);
-    float4 worldQuat = TransformRotation(localQuat, _ModelRotation);
-    float3 worldScale = localScale * _ModelScale * _SplatScale;
+    // Transform to view space
+    float3 viewPos = LocalToView(localPos);
     
-    // Transform to clip space.
-    // IMPORTANT: use explicit uniforms set from C# for compute dispatches.
-    // UNITY_MATRIX_V / UNITY_MATRIX_P are not guaranteed to be valid in compute kernels.
-    float4 viewPos4 = mul(_MatrixV, float4(worldPos, 1.0));
-    float4 clipPos = mul(_MatrixP, viewPos4);
+    // Visibility check
+    float visible = 1.0;
+    if (-viewPos.z < _NearPlane)
+        visible = 0.0;
+    if (-viewPos.z > _FarPlane)
+        visible = 0.0;
     
-    // Check if behind camera (cull)
-    if (clipPos.w <= 0)
+    // Frustum culling in clip space
+    if (visible > 0.5)
     {
-        view.pos = float4(0, 0, 0, 0);  // Mark as culled
-        _SplatViewData[idx] = view;
-        return;
+        float4 clipPos = ViewToClip(viewPos);
+        if (abs(clipPos.x) > clipPos.w * 1.5 ||
+            abs(clipPos.y) > clipPos.w * 1.5 ||
+            clipPos.z < 0 || clipPos.z > clipPos.w)
+        {
+            visible = 0.0;
+        }
     }
     
-    view.pos = clipPos;
-    
-    // Compute view direction for SH evaluation (needed for both modes)
-    float3 viewDir = normalize(_CameraWorldPos - worldPos);
-    
-    // Evaluate spherical harmonics for view-dependent color
-    float3 rgb;
-    if (_SHBands > 0 && _SHRestCount > 0)
-    {
-        rgb = EvaluateSH(shColor.rgb, _SHRest, _SHRestCount, physIdx, viewDir, _SHBands);
-    }
+    // Write updated key
+    if (visible < 0.5)
+        b_sort[idx] = 1e30;
     else
-    {
-        rgb = SHToColor(shColor.rgb);
-    }
+        b_sort[idx] = ComputeDepthSortKey(viewPos.z);
+}
+
+
+// Odd-Even Transposition Sort for incremental sort repair.
+// When the camera moves slightly, depth keys change but the sort order is nearly correct. Instead of a full 
+// O(N) radix sort, update depth keys and run a few compare-swap passes to fix local inversions.
+// Each pass processes N/2 independent pairs in parallel.
+uint _OddEvenPhase; // 0 = even pairs, 1 = odd pairs
+
+[numthreads(GROUP_SIZE, 1, 1)]
+void OddEvenPass(uint3 id : SV_DispatchThreadID)
+{
+    // Each thread handles one compare-swap pair
+    uint pairIdx = id.x;
     
-    // Convert to linear color space based on mode
-    // 0 = Auto: use Unity's color space setting
-    // 1 = ForceLinear: always convert
-    // 2 = ForceGamma: never convert
-    bool convertToLinear = false;
-    if (_ColorSpaceMode == 1)
-        convertToLinear = true;
-    else if (_ColorSpaceMode == 0)
-    {
-        #ifndef UNITY_COLORSPACE_GAMMA
-            convertToLinear = true;
-        #endif
-    }
-    if (convertToLinear)
-        rgb = GammaToLinear(rgb);
+    // Compute the left element index based on phase
+    uint left = pairIdx * 2 + _OddEvenPhase;
+    uint right = left + 1;
     
-    // Pack color as FP16
-    // x = (r_fp16 << 16) | g_fp16, y = (b_fp16 << 16) | a_fp16
-    view.color.x = (f32tof16(rgb.r) << 16) | f32tof16(rgb.g);
-    view.color.y = (f32tof16(rgb.b) << 16) | f32tof16(shColor.a);
-    
-    // Debug points mode: skip covariance, use uniform-size billboard axes
-    if (_DebugPoints)
-    {
-        float pointRadius = _DebugPointSize * 0.5;
-        view.axis1 = float2(pointRadius, 0);
-        view.axis2 = float2(0, pointRadius);
-        _SplatViewData[idx] = view;
+    // Bounds check
+    if (right >= _SplatCount)
         return;
+    
+    // Read current sort keys at these positions
+    float keyL = b_sort[left];
+    float keyR = b_sort[right];
+    
+    // Compare: for ascending sort, swap if left > right
+    if (keyL > keyR)
+    {
+        // Swap keys
+        b_sort[left] = keyR;
+        b_sort[right] = keyL;
+        
+        // Swap corresponding payload indices
+        uint payL = b_sortPayload[left];
+        uint payR = b_sortPayload[right];
+        b_sortPayload[left] = payR;
+        b_sortPayload[right] = payL;
     }
-    
-    // Normal splat mode: compute 3D covariance and project to 2D ellipse
-    float3 covA, covB;
-    ComputeCovariance3D(worldQuat, worldScale, covA, covB);
-    
-    // Project to 2D covariance
-    float3 cov2D = CalcCovariance2D(worldPos, covA, covB, _MatrixMV, _MatrixP, _VecScreenParams);
-    
-    // Decompose covariance to ellipse axes
-    float diag1 = cov2D.x, diag2 = cov2D.z, offDiag = cov2D.y;
-    float mid = 0.5 * (diag1 + diag2);
-    float radius = length(float2((diag1 - diag2) * 0.5, offDiag));
-    float lambda1 = mid + radius;
-    float lambda2 = max(mid - radius, 0.1);
-    
-    float2 diagVec = normalize(float2(offDiag, lambda1 - diag1 + 1e-6));
-    diagVec.y = -diagVec.y;
-    
-    // Scale axes by sqrt(2 * eigenvalue) and cap at reasonable max size
-    float maxSize = 4096.0;
-    view.axis1 = min(sqrt(2.0 * lambda1), maxSize) * diagVec;
-    view.axis2 = min(sqrt(2.0 * lambda2), maxSize) * float2(diagVec.y, -diagVec.x);
-    
-    _SplatViewData[idx] = view;
 }
