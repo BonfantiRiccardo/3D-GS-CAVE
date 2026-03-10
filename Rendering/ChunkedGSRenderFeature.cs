@@ -435,53 +435,51 @@ namespace GaussianSplatting
 
                             framesSinceFullSort++;
                         }
-
-                        //Only recompute view data if splats where reordered due to camera movement or chunk changes.
-                        // Dispatch CalcSplatViewData on the precompute shader
-                        var pc = data.precomputeShader;
-
-                        // Shared uniforms (same names as sorting shader for ergonomic C# binding)
-                        context.cmd.SetComputeMatrixParam(pc, "_MatrixV", data.viewMatrix);
-                        context.cmd.SetComputeMatrixParam(pc, "_MatrixP", data.projMatrix);
-                        context.cmd.SetComputeVectorParam(pc, "_VecScreenParams", data.screenParams);
-                        context.cmd.SetComputeIntParam(pc, "_SplatCount", splatCount);
-                        context.cmd.SetComputeIntParam(pc, "_UseRemap", 1);
-
-                        // Model transform
-                        context.cmd.SetComputeVectorParam(pc, "_ModelPosition", component.modelPosition);
-                        Quaternion pcRot = component.ModelRotation;
-                        context.cmd.SetComputeVectorParam(pc, "_ModelRotation", new Vector4(pcRot.x, pcRot.y, pcRot.z, pcRot.w));
-                        context.cmd.SetComputeVectorParam(pc, "_ModelScale", component.modelScale);
-
-                        // Precompute-specific uniforms
-                        float effectiveSplatScale = data.splatSize * (data.splatScales != null && i < data.splatScales.Length ? data.splatScales[i] : 1.0f);
-                        context.cmd.SetComputeFloatParam(pc, "_SplatScale", effectiveSplatScale);
-                        context.cmd.SetComputeVectorParam(pc, "_CameraWorldPos", data.cameraWorldPos);
-                        context.cmd.SetComputeIntParam(pc, "_SHBands", component.ShBandsNumber);
-                        context.cmd.SetComputeIntParam(pc, "_SHRestCount", component.asset != null ? component.asset.SHRestCount : 0);
-
-                        int csMode = (data.colorSpaceModes != null && i < data.colorSpaceModes.Length) ? data.colorSpaceModes[i] : 0;
-                        context.cmd.SetComputeIntParam(pc, "_ColorSpaceMode", csMode);
-
-                        bool debugPts = data.debugPoints != null && i < data.debugPoints.Length && data.debugPoints[i];
-                        context.cmd.SetComputeIntParam(pc, "_DebugPoints", debugPts ? 1 : 0);
-                        float debugPtSize = data.debugPointSizes != null && i < data.debugPointSizes.Length ? data.debugPointSizes[i] : 3.0f;
-                        context.cmd.SetComputeFloatParam(pc, "_DebugPointSize", debugPtSize);
-
-                        Matrix4x4 matrixMV = data.viewMatrix;
-                        context.cmd.SetComputeMatrixParam(pc, "_MatrixMV", matrixMV);
-
-                        // Bind splat data buffers (positions, rotations, scales)
-                        component.BindToCompute(context.cmd, pc, kernelCalcSplatViewData);
-                        if (component.SHBuffer != null)
-                            context.cmd.SetComputeBufferParam(pc, kernelCalcSplatViewData, "_SH", component.SHBuffer);
-                        if (component.SHRestBuffer != null)
-                            context.cmd.SetComputeBufferParam(pc, kernelCalcSplatViewData, "_SHRest", component.SHRestBuffer);
-
-                        resources.BindSplatViewDataOutput(context.cmd, pc, kernelCalcSplatViewData);
-                        context.cmd.DispatchCompute(pc, kernelCalcSplatViewData, groups, 1, 1);
-                        
                     }
+
+                    // Dispatch CalcSplatViewData on the precompute shader
+                    var pc = data.precomputeShader;
+
+                    // Shared uniforms (same names as sorting shader for ergonomic C# binding)
+                    context.cmd.SetComputeMatrixParam(pc, "_MatrixV", data.viewMatrix);
+                    context.cmd.SetComputeMatrixParam(pc, "_MatrixP", data.projMatrix);
+                    context.cmd.SetComputeVectorParam(pc, "_VecScreenParams", data.screenParams);
+                    context.cmd.SetComputeIntParam(pc, "_SplatCount", splatCount);
+                    context.cmd.SetComputeIntParam(pc, "_UseRemap", 1);
+
+                    // Model transform
+                    context.cmd.SetComputeVectorParam(pc, "_ModelPosition", component.modelPosition);
+                    Quaternion pcRot = component.ModelRotation;
+                    context.cmd.SetComputeVectorParam(pc, "_ModelRotation", new Vector4(pcRot.x, pcRot.y, pcRot.z, pcRot.w));
+                    context.cmd.SetComputeVectorParam(pc, "_ModelScale", component.modelScale);
+
+                    // Precompute-specific uniforms
+                    float effectiveSplatScale = data.splatSize * (data.splatScales != null && i < data.splatScales.Length ? data.splatScales[i] : 1.0f);
+                    context.cmd.SetComputeFloatParam(pc, "_SplatScale", effectiveSplatScale);
+                    context.cmd.SetComputeVectorParam(pc, "_CameraWorldPos", data.cameraWorldPos);
+                    context.cmd.SetComputeIntParam(pc, "_SHBands", component.ShBandsNumber);
+                    context.cmd.SetComputeIntParam(pc, "_SHRestCount", component.asset != null ? component.asset.SHRestCount : 0);
+
+                    int csMode = (data.colorSpaceModes != null && i < data.colorSpaceModes.Length) ? data.colorSpaceModes[i] : 0;
+                    context.cmd.SetComputeIntParam(pc, "_ColorSpaceMode", csMode);
+
+                    bool debugPts = data.debugPoints != null && i < data.debugPoints.Length && data.debugPoints[i];
+                    context.cmd.SetComputeIntParam(pc, "_DebugPoints", debugPts ? 1 : 0);
+                    float debugPtSize = data.debugPointSizes != null && i < data.debugPointSizes.Length ? data.debugPointSizes[i] : 3.0f;
+                    context.cmd.SetComputeFloatParam(pc, "_DebugPointSize", debugPtSize);
+
+                    Matrix4x4 matrixMV = data.viewMatrix;
+                    context.cmd.SetComputeMatrixParam(pc, "_MatrixMV", matrixMV);
+
+                    // Bind splat data buffers (positions, rotations, scales)
+                    component.BindToCompute(context.cmd, pc, kernelCalcSplatViewData);
+                    if (component.SHBuffer != null)
+                        context.cmd.SetComputeBufferParam(pc, kernelCalcSplatViewData, "_SH", component.SHBuffer);
+                    if (component.SHRestBuffer != null)
+                        context.cmd.SetComputeBufferParam(pc, kernelCalcSplatViewData, "_SHRest", component.SHRestBuffer);
+
+                    resources.BindSplatViewDataOutput(context.cmd, pc, kernelCalcSplatViewData);
+                    context.cmd.DispatchCompute(pc, kernelCalcSplatViewData, groups, 1, 1);
                 }
             }
 

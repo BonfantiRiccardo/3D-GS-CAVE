@@ -12,7 +12,7 @@ namespace GaussianSplatting.Editor
     /// Data is spatially sorted using Morton codes and partitioned into chunks for
     /// efficient frustum culling and streaming at runtime.
     /// </summary>
-    [ScriptedImporter(5, "ply")]
+    [ScriptedImporter(6, "ply")]
     public class PLYImporter : ScriptedImporter
     {
         [SerializeField]
@@ -34,74 +34,40 @@ namespace GaussianSplatting.Editor
                  "granularity but increase chunk management overhead. Recommended: 2048 to 8192.")]
         private int m_ChunkSize = SpatialSorter.DefaultChunkSize;
 
+        /// <summary>
+        /// IProgress wrapper using the Unity Progress API (task-based progress system).
+        /// Progress tasks are always visible in the Background Tasks window and the status bar.
+        /// </summary>
         private sealed class ImportProgress : IProgress<float>, IDisposable
         {
-            private readonly string _fileName;
+            private readonly int _progressId;
             private bool _disposed;
+            private string _phase;
 
             public ImportProgress(string fileName)
             {
-                _fileName = fileName;
+                _progressId = Progress.Start("Importing PLY", fileName, Progress.Options.Synchronous);
+                _phase = fileName;
+            }
+
+            /// <summary>Sets the current phase description shown in the progress UI.</summary>
+            public void SetPhase(string phase)
+            {
+                _phase = phase;
             }
 
             public void Report(float value)
             {
-                if (_disposed || !CanShowProgressBar())
-                {
-                    return;
-                }
-
-                float clamped = Mathf.Clamp01(value);
-                EditorUtility.DisplayProgressBar(
-                    "Importing PLY",
-                    $"{_fileName} - {clamped * 100f:F0}%",
-                    clamped);
+                if (_disposed) return;
+                Progress.Report(_progressId, Mathf.Clamp01(value), _phase);
             }
 
             public void Dispose()
             {
-                if (_disposed)
-                {
-                    return;
-                }
-
+                if (_disposed) return;
                 _disposed = true;
-                if (!CanShowProgressBar())
-                {
-                    return;
-                }
-
-                EditorUtility.ClearProgressBar();
-                EditorApplication.delayCall += EditorUtility.ClearProgressBar;
+                Progress.Remove(_progressId);
             }
-        }
-
-        private static bool CanShowProgressBar()
-        {
-            if (Application.isBatchMode)
-            {
-                return false;
-            }
-
-#if UNITY_2021_2_OR_NEWER
-            if (AssetDatabase.IsAssetImportWorkerProcess())
-            {
-                return false;
-            }
-#endif
-
-            return true;
-        }
-
-        [InitializeOnLoadMethod]
-        private static void ClearStaleProgressBarAfterDomainReload()
-        {
-            if (!CanShowProgressBar())
-            {
-                return;
-            }
-
-            EditorApplication.delayCall += EditorUtility.ClearProgressBar;
         }
 
         /// <summary>
@@ -113,12 +79,17 @@ namespace GaussianSplatting.Editor
         {
             string fileName = Path.GetFileName(ctx.assetPath);
             using var progress = new ImportProgress(fileName);
+
+            // Phase 1: Parse PLY file
+            progress.SetPhase("Parsing PLY...");
             progress.Report(0f);
 
             GSImportData data;
             try
             {
-                data = AsyncPLYParser.Parse(ctx.assetPath, progress, m_SHQuality, m_CoordinateFlip);
+                // Create a sub-progress that maps parser's 0-1 range to our 0-0.5 range
+                var parseProgress = new ScaledProgress(progress, 0f, 0.5f);
+                data = AsyncPLYParser.Parse(ctx.assetPath, parseProgress, m_SHQuality, m_CoordinateFlip);
             }
             catch (Exception ex)
             {
@@ -126,19 +97,26 @@ namespace GaussianSplatting.Editor
                 data = PLYParser.Parse(ctx.assetPath);
             }
 
-            // Create external data directory: {StreamingAssets}/{plyName}/
+            // Phase 2: Sort, chunk, write external data, build asset
             string plyName = Path.GetFileNameWithoutExtension(ctx.assetPath);
             string absoluteDataPath = Path.Combine(Application.streamingAssetsPath, plyName);
 
-            // Use the chunked pipeline: sort spatially, partition, and write
+            progress.SetPhase("Chunking and building octree...");
             progress.Report(0.5f);
+
+            // Create a sub-progress that maps builder's 0-1 range to our 0.5-0.95 range
+            var buildProgress = new ScaledProgress(progress, 0.5f, 0.95f);
             var (asset, chunks) = ChunkedGSAssetBuilder.ProcessAndBuild(
                 data,
                 absoluteDataPath,
                 plyName,
-                m_ChunkSize);
+                m_ChunkSize,
+                buildProgress);
 
             asset.name = plyName;
+
+            progress.SetPhase("Finalising asset...");
+            progress.Report(0.95f);
 
             Debug.Log(
                 $"PLY import (chunked): {ctx.assetPath} | Splats={data.Positions?.Length ?? 0} | " +
@@ -152,6 +130,29 @@ namespace GaussianSplatting.Editor
             ctx.AddObjectToAsset("ChunkedGSAsset", asset);
             ctx.SetMainObject(asset);
             progress.Report(1f);
+        }
+    }
+
+    /// <summary>
+    /// Maps an inner IProgress{float} 0-1 range to a sub-range of an outer IProgress{float}.
+    /// Used to compose multi-phase progress from independent phases that each report 0-1.
+    /// </summary>
+    internal sealed class ScaledProgress : IProgress<float>
+    {
+        private readonly IProgress<float> _outer;
+        private readonly float _start;
+        private readonly float _range;
+
+        public ScaledProgress(IProgress<float> outer, float start, float end)
+        {
+            _outer = outer;
+            _start = start;
+            _range = end - start;
+        }
+
+        public void Report(float value)
+        {
+            _outer.Report(_start + Mathf.Clamp01(value) * _range);
         }
     }
 }

@@ -5,6 +5,8 @@ using System.IO;
 using System.Threading;
 using UnityEngine;
 
+
+
 namespace GaussianSplatting
 {
     /// <summary>
@@ -103,9 +105,9 @@ namespace GaussianSplatting
         private readonly byte[] stagingSH;
         private readonly byte[] stagingSHRest;   // null when SH rest stride is 0
 
-        // Per-frame dirty tracking — attribute slot range (bounding dirty slots)
-        private int dirtySlotMin = int.MaxValue;
-        private int dirtySlotMax = -1;
+        // Per-frame dirty tracking 
+        private readonly HashSet<int> dirtySlots = new HashSet<int>();
+        private readonly List<int> dirtySlotsTemp = new List<int>(); // scratch for sorted iteration
 
         // Per-frame dirty tracking — remap index range
         private int dirtyRemapMin = int.MaxValue;
@@ -114,6 +116,7 @@ namespace GaussianSplatting
         // Slot management
         private readonly Stack<int> freeSlots;
         private readonly HashSet<int> readyChunkSet;
+        private readonly HashSet<int> pendingChunkSet;
         private readonly List<int> activeChunkOrder;
 
         // Async I/O infrastructure
@@ -138,8 +141,13 @@ namespace GaussianSplatting
 
         // Scratch lists (reused each frame to avoid allocations)
         private readonly List<int> innerVisibleList;
+        private readonly List<int> outerVisibleList;
         private readonly List<int> toEvictList;
         private readonly List<int> toLoadList;
+
+        // Octree for fast frustum culling (null when asset has no octree)
+        private readonly ChunkOctreeNode[] octreeNodes;
+        private readonly HashSet<int> outerVisibleSet;
 
         // Current state
         private int currentActiveSplatCount;
@@ -253,6 +261,7 @@ namespace GaussianSplatting
                 freeSlots.Push(i);
 
             readyChunkSet = new HashSet<int>();
+            pendingChunkSet = new HashSet<int>();
             activeChunkOrder = new List<int>(maxSlots);
 
             // Remap array: sized at pool capacity so it can hold the maximum
@@ -277,8 +286,13 @@ namespace GaussianSplatting
 
             // Scratch
             innerVisibleList = new List<int>(chunkMeta.Length);
+            outerVisibleList = new List<int>(chunkMeta.Length);
             toEvictList = new List<int>();
             toLoadList = new List<int>();
+
+            // Cache octree from asset
+            octreeNodes = asset.HasOctree ? asset.OctreeNodes : null;
+            outerVisibleSet = new HashSet<int>();
 
             // Resolve file paths once (immutable, safe for background thread)
             posFilePath = asset.ResolveFilePath(ChunkedGSAsset.PositionsFileName);
@@ -372,6 +386,7 @@ namespace GaussianSplatting
             remapGPU = null;
 
             readyChunkSet.Clear();
+            pendingChunkSet.Clear();
             activeChunkOrder.Clear();
             currentActiveSplatCount = 0;
         }
@@ -510,21 +525,47 @@ namespace GaussianSplatting
             // Step 1: drain completed async reads into CPU staging (no GPU calls)
             ProcessCompletedReads();
 
-            // Step 2: frustum cull all chunk AABBs
+            // Step 2: frustum cull chunk AABBs (octree-accelerated)
             GeometryUtility.CalculateFrustumPlanes(camera, basePlanes);
             ExpandPlanes(basePlanes, loadMargin, innerPlanes);
             ExpandPlanes(basePlanes, unloadMargin, outerPlanes);
 
             innerVisibleList.Clear();
-            for (int i = 0; i < chunks.Length; i++)
+            outerVisibleList.Clear();
+
+            if (octreeNodes != null && octreeNodes.Length > 0)
             {
-                ChunkRuntime c = chunks[i];
+                // Octree-accelerated frustum culling: O(visible nodes) instead of O(all chunks)
+                ChunkOctree.QueryFrustum(octreeNodes, innerPlanes, modelMatrix, innerVisibleList);
+                ChunkOctree.QueryFrustum(octreeNodes, outerPlanes, modelMatrix, outerVisibleList);
 
-                if (c.metadata.IsVisibleInFrustum(outerPlanes, modelMatrix))
-                    c.lastVisibleFrame = frame;
+                // Update lastVisibleFrame for all chunks in the outer frustum
+                outerVisibleSet.Clear();
+                for (int i = 0; i < outerVisibleList.Count; i++)
+                {
+                    int idx = outerVisibleList[i];
+                    chunks[idx].lastVisibleFrame = frame;
+                    outerVisibleSet.Add(idx);
+                }
+            }
+            else
+            {
+                // Fallback: linear scan of all chunks
+                Debug.LogWarning("GSChunkStreamer: asset has no octree, falling back to linear chunk culling. " +
+                    "Consider generating an octree for better performance on large scenes.");
+                for (int i = 0; i < chunks.Length; i++)
+                {
+                    ChunkRuntime c = chunks[i];
 
-                if (c.metadata.IsVisibleInFrustum(innerPlanes, modelMatrix))
-                    innerVisibleList.Add(i);
+                    if (c.metadata.IsVisibleInFrustum(outerPlanes, modelMatrix))
+                    {
+                        c.lastVisibleFrame = frame;
+                        outerVisibleSet.Add(i);
+                    }
+
+                    if (c.metadata.IsVisibleInFrustum(innerPlanes, modelMatrix))
+                        innerVisibleList.Add(i);
+                }
             }
 
             // Step 3: determine and execute evictions
@@ -539,13 +580,11 @@ namespace GaussianSplatting
             }
 
             // Also evict Pending chunks whose reads are no longer needed
-            for (int i = 0; i < chunks.Length; i++)
+            // Iterate only the tracked pending set, not all chunks
+            foreach (int pci in pendingChunkSet)
             {
-                if (chunks[i].state == SlotState.Pending &&
-                    (frame - chunks[i].lastVisibleFrame) > evictionDelayFrames)
-                {
-                    toEvictList.Add(i);
-                }
+                if ((frame - chunks[pci].lastVisibleFrame) > evictionDelayFrames)
+                    toEvictList.Add(pci);
             }
 
             bool readyChunksEvicted = false;
@@ -587,6 +626,7 @@ namespace GaussianSplatting
                 int slot = freeSlots.Pop();
                 chunks[idx].state = SlotState.Pending;
                 chunks[idx].slotIndex = slot;
+                pendingChunkSet.Add(idx);
                 requestQueue.Enqueue(new ReadRequest { chunkIndex = idx, slotIndex = slot });
             }
 
@@ -626,6 +666,7 @@ namespace GaussianSplatting
                     int slot = c.slotIndex;
                     c.state = SlotState.Unloaded;
                     c.slotIndex = -1;
+                    pendingChunkSet.Remove(result.chunkIndex);
                     if (slot >= 0)
                         freeSlots.Push(slot);
                     Debug.LogError($"GSChunkStreamer: failed to load chunk {result.chunkIndex}: {result.error}");
@@ -636,6 +677,7 @@ namespace GaussianSplatting
                 CopyToStaging(result);
 
                 c.state = SlotState.Ready;
+                pendingChunkSet.Remove(result.chunkIndex);
                 readyChunkSet.Add(result.chunkIndex);
                 activeChunkOrder.Add(result.chunkIndex);
 
@@ -675,9 +717,8 @@ namespace GaussianSplatting
             CopyRegion(result.sh,        stagingSH,        splatBase, splatCount, ChunkedGSAsset.SHStride);
             CopyRegion(result.shRest,    stagingSHRest,    splatBase, splatCount, shRestStride);
 
-            // Expand dirty slot range
-            if (slot < dirtySlotMin) dirtySlotMin = slot;
-            if (slot > dirtySlotMax) dirtySlotMax = slot;
+            // Track dirty slot for this chunk
+            dirtySlots.Add(slot);
         }
 
         /// <summary>
@@ -710,6 +751,7 @@ namespace GaussianSplatting
             c.remapStartIdx = -1;
 
             readyChunkSet.Remove(chunkIndex);
+            pendingChunkSet.Remove(chunkIndex);
             bufferContentsDirty = true;
             statEvictCount++;
         }
@@ -758,43 +800,70 @@ namespace GaussianSplatting
 
 
         // ------------------------------------------------------------------
-        //  Batched GPU flush
+        //  GPU flush
 
         /// <summary>
-        /// Uploads all per-frame dirty data to the GPU in at most 6 SetData calls: up to 5 for attribute 
-        /// buffers (bounding dirty slot range) and 1 for the remap buffer (bounding dirty index range). 
-        /// Because the driver scheduling overhead is per-call not per-byte, this avoids the N×5 call storm that
-        /// caused TDR crashes with individual per-chunk uploads.
+        /// Uploads all per-frame dirty data to the GPU.
+        /// For each contiguous run of dirty slots this issues one SetData call per attribute buffer (position, rotation, 
+        /// scale, SH, and SHRest if present). After all runs are flushed the remap buffer is uploaded for the dirty index range.
+        /// Total SetData calls = (#runs * attributeCount) + 1 (remap).
         /// </summary>
         private void FlushToGPU()
         {
-            // --- Attribute buffers: one SetData per attribute covering the bounding dirty slot range ---
-            if (dirtySlotMin <= dirtySlotMax)
+            // Attribute buffers: per-run SetData for contiguous groups of dirty slots
+            if (dirtySlots.Count > 0)
             {
-                int startSplat = dirtySlotMin * chunkSize;
-                int endSplat = Mathf.Min((dirtySlotMax + 1) * chunkSize, poolCapacity);
+                // Sort so we can merge adjacent slots into single SetData calls
+                dirtySlotsTemp.Clear();
+                dirtySlotsTemp.AddRange(dirtySlots);
+                dirtySlotsTemp.Sort();
 
-                FlushAttribute(positionBuffer, stagingPositions, ChunkedGSAsset.PositionStride, startSplat, endSplat);
-                FlushAttribute(rotationBuffer, stagingRotations, ChunkedGSAsset.RotationStride, startSplat, endSplat);
-                FlushAttribute(scaleBuffer,    stagingScales,    ChunkedGSAsset.ScaleStride,    startSplat, endSplat);
-                FlushAttribute(shBuffer,       stagingSH,        ChunkedGSAsset.SHStride,       startSplat, endSplat);
+                // Walk sorted slots, merge adjacent ones into contiguous runs
+                int runStart = dirtySlotsTemp[0];
+                int runEnd = runStart; 
 
-                if (shRestBuffer != null && stagingSHRest != null)
-                    FlushAttribute(shRestBuffer, stagingSHRest, shRestStride, startSplat, endSplat);
+                for (int i = 1; i < dirtySlotsTemp.Count; i++)
+                {
+                    int slot = dirtySlotsTemp[i];
+                    if (slot == runEnd + 1)
+                    {
+                        runEnd = slot; // extend current run
+                    }
+                    else
+                    {
+                        // Flush the completed run
+                        FlushSlotRun(runStart, runEnd);
+                        runStart = slot;
+                        runEnd = slot;
+                    }
+                }
+                FlushSlotRun(runStart, runEnd); // flush final run
 
-                dirtySlotMin = int.MaxValue;
-                dirtySlotMax = -1;
+                dirtySlots.Clear();
             }
 
-            // --- Remap buffer: one SetData covering the dirty index range ---
+            // Remap buffer
             if (dirtyRemapMin <= dirtyRemapMax)
             {
                 int count = dirtyRemapMax - dirtyRemapMin + 1;
                 remapGPU.SetData(remapCPU, dirtyRemapMin, dirtyRemapMin, count);
-
                 dirtyRemapMin = int.MaxValue;
                 dirtyRemapMax = -1;
             }
+        }
+
+        private void FlushSlotRun(int startSlot, int endSlot)
+        {
+            int startSplat = startSlot * chunkSize;
+            int endSplat = Mathf.Min((endSlot + 1) * chunkSize, poolCapacity);
+
+            FlushAttribute(positionBuffer, stagingPositions, ChunkedGSAsset.PositionStride, startSplat, endSplat);
+            FlushAttribute(rotationBuffer, stagingRotations, ChunkedGSAsset.RotationStride, startSplat, endSplat);
+            FlushAttribute(scaleBuffer, stagingScales, ChunkedGSAsset.ScaleStride, startSplat, endSplat);
+            FlushAttribute(shBuffer, stagingSH, ChunkedGSAsset.SHStride, startSplat, endSplat);
+
+            if (shRestBuffer != null && stagingSHRest != null)
+                FlushAttribute(shRestBuffer, stagingSHRest, shRestStride, startSplat, endSplat);
         }
 
         /// <summary>

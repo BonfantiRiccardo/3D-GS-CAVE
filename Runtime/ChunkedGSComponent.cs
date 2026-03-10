@@ -261,6 +261,13 @@ namespace GaussianSplatting
 
             Matrix4x4 modelMatrix = transform.localToWorldMatrix;
             streamer.UpdateVisibility(camera, modelMatrix);
+
+#if UNITY_EDITOR
+            // Force continuous scene view repaints while chunks are still loading, so ProcessCompletedReads()
+            //  gets called each frame rather than only when the user moves the mouse.
+            if (streamer.PendingReadCount > 0)
+                UnityEditor.SceneView.RepaintAll();
+#endif
         }
 
         /// <summary>

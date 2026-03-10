@@ -51,6 +51,9 @@ namespace GaussianSplatting
         [SerializeField, HideInInspector]
         private ChunkInfo[] chunks;
 
+        [SerializeField, HideInInspector]
+        private ChunkOctreeNode[] octreeNodes;
+
         // File names for external data
         public const string PositionsFileName = "positions.bytes";
         public const string RotationsFileName = "rotations.bytes";
@@ -68,6 +71,8 @@ namespace GaussianSplatting
         public int SHRestCount => shRestCount;
         public string AssetFolderName => assetFolderName;
         public ChunkInfo[] Chunks => chunks;
+        public ChunkOctreeNode[] OctreeNodes => octreeNodes;
+        public bool HasOctree => octreeNodes != null && octreeNodes.Length > 0;
         public int SHRestStride => shRestCount * sizeof(float);
 
         /// <summary>
@@ -102,6 +107,17 @@ namespace GaussianSplatting
             this.chunks = chunks;
             this.chunkCount = chunks?.Length ?? 0;
             this.assetFolderName = assetFolderName;
+
+            // Build octree over chunk AABBs for fast frustum culling
+            if (chunks != null && chunks.Length > 0)
+            {
+                this.octreeNodes = ChunkOctree.Build(chunks, globalBounds);
+                Debug.Log($"ChunkedGSAsset: built octree with {octreeNodes.Length} nodes over {chunks.Length} chunks");
+            }
+            else
+            {
+                this.octreeNodes = System.Array.Empty<ChunkOctreeNode>();
+            }
         }
 
         /// <summary>

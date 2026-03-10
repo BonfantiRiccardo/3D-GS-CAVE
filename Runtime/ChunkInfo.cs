@@ -49,6 +49,10 @@ namespace GaussianSplatting
             return GeometryUtility.TestPlanesAABB(frustumPlanes, worldBounds);
         }
 
+        /// <summary> Static version of bounds transformation for use in contexts where instance methods are not available. </summary>
+        public static Bounds TransformBoundsStatic(Bounds localBounds, Matrix4x4 matrix)
+            => TransformBounds(localBounds, matrix);
+
         /// <summary>
         /// Transforms an AABB by a matrix, computing a new AABB that encloses
         /// the transformed original.

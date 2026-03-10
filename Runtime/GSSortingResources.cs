@@ -15,7 +15,7 @@ namespace GaussianSplatting
         private const int RADIX_PASSES = 4;     // Number of radix passes (32-bit / 8-bit)
         private const int PART_SIZE = 3840;     // Partition size for radix sort
 
-        // SplatViewData struct size: float4 pos + float2 axis1 + float2 axis2 + uint2 color = 4*4 + 2*4 + 2*4 + 2*4 = 32 bytes
+        // SplatViewData struct size: float4 pos + float2 axis1 + float2 axis2 + uint2 color = 4*4 + 2*4 + 2*4 + 2*4 = 40 bytes
         private const int SPLAT_VIEW_DATA_STRIDE = 40;
 
         // Primary sort buffers
