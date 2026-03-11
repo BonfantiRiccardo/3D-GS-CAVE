@@ -55,6 +55,9 @@ int _ColorSpaceMode;         // 0 = Auto (use Unity setting), 1 = ForceLinear, 2
 int _DebugPoints;            // 1 = render as uniform billboard points, 0 = normal splat rendering
 float _DebugPointSize;       // Size of debug points in pixels
 
+// 2D dispatch: number of thread groups in the X dimension. Used to recover linear index from 2D thread groups.
+uint _DispatchGroupsX;
+
 // Model transform
 float3 _ModelPosition;
 float4 _ModelRotation;
@@ -67,7 +70,7 @@ float3 _ModelScale;
 [numthreads(GROUP_SIZE, 1, 1)]
 void CalcSplatViewData(uint3 id : SV_DispatchThreadID)
 {
-    uint idx = id.x;
+    uint idx = id.x + id.y * _DispatchGroupsX * GROUP_SIZE;
     if (idx >= _SplatCount)
         return;
     

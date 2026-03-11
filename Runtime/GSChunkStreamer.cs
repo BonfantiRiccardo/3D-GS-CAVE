@@ -535,7 +535,7 @@ namespace GaussianSplatting
 
             if (octreeNodes != null && octreeNodes.Length > 0)
             {
-                // Octree-accelerated frustum culling: O(visible nodes) instead of O(all chunks)
+                // Octree-accelerated frustum culling: O(visible nodes)
                 ChunkOctree.QueryFrustum(octreeNodes, innerPlanes, modelMatrix, innerVisibleList);
                 ChunkOctree.QueryFrustum(octreeNodes, outerPlanes, modelMatrix, outerVisibleList);
 
@@ -636,8 +636,7 @@ namespace GaussianSplatting
             // Update pending count for diagnostics
             PendingReadCount = requestQueue.Count;
 
-            // Step 5: flush all changes to GPU — max 6 SetData calls (5 attribute buffers covering 
-            // the bounding dirty slot range, 1 remap buffer covering the dirty index range)
+            // Step 5: flush all changes to GPU
             FlushToGPU();
         }
 

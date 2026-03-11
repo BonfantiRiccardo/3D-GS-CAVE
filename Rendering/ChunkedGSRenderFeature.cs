@@ -111,6 +111,7 @@ namespace GaussianSplatting
             private readonly ChunkedGSRenderSettings settings;
             private const int SortGroupSize = 256;
             private const int RadixBins = 256;
+            private const int MaxDispatchGroupsPerDim = 65535;
 
             public ChunkedGSRenderPass(ChunkedGSRenderSettings settings)
             {
@@ -292,6 +293,16 @@ namespace GaussianSplatting
                 EnsureSortKernels(data.sortingShader);
                 EnsurePrecomputeKernels(data.precomputeShader);
 
+                // Dispatch a kernel using 2D thread groups so that the total group count can exceed 
+                // the 65,535-per-dimension limit.
+                void DispatchLinear(ComputeShader shader, int kernel, int totalGroups)
+                {
+                    int groupsX = Mathf.Min(totalGroups, MaxDispatchGroupsPerDim);
+                    int groupsY = (totalGroups + groupsX - 1) / groupsX;
+                    context.cmd.SetComputeIntParam(shader, "_DispatchGroupsX", groupsX);
+                    context.cmd.DispatchCompute(shader, kernel, groupsX, groupsY, 1);
+                }
+
                 for (int i = 0; i < data.components.Length; i++)
                 {
                     ChunkedGSComponent component = data.components[i];
@@ -377,16 +388,16 @@ namespace GaussianSplatting
                             // Init sort buffers
                             resources.BindSortInputs(context.cmd, data.sortingShader, kernelInitSortBuffers);
                             component.BindToCompute(context.cmd, data.sortingShader, kernelInitSortBuffers);
-                            context.cmd.DispatchCompute(data.sortingShader, kernelInitSortBuffers, groups, 1, 1);
+                            DispatchLinear(data.sortingShader, kernelInitSortBuffers, groups);
 
                             // View data
                             resources.BindSortInputs(context.cmd, data.sortingShader, kernelCalcViewData);
                             component.BindToCompute(context.cmd, data.sortingShader, kernelCalcViewData);
-                            context.cmd.DispatchCompute(data.sortingShader, kernelCalcViewData, groups, 1, 1);
+                            DispatchLinear(data.sortingShader, kernelCalcViewData, groups);
 
                             // Sort keys
                             resources.BindSortInputs(context.cmd, data.sortingShader, kernelCalcSortKeys);
-                            context.cmd.DispatchCompute(data.sortingShader, kernelCalcSortKeys, groups, 1, 1);
+                            DispatchLinear(data.sortingShader, kernelCalcSortKeys, groups);
 
                             // Radix sort (4 passes)
                             context.cmd.SetComputeIntParam(data.sortingShader, "e_numKeys", splatCount);
@@ -416,7 +427,7 @@ namespace GaussianSplatting
                             // Step 1: Update depth keys in-place (preserves existing sort order)
                             resources.BindSortInputs(context.cmd, data.sortingShader, kernelUpdateSortKeysInPlace);
                             component.BindToCompute(context.cmd, data.sortingShader, kernelUpdateSortKeysInPlace);
-                            context.cmd.DispatchCompute(data.sortingShader, kernelUpdateSortKeysInPlace, groups, 1, 1);
+                            DispatchLinear(data.sortingShader, kernelUpdateSortKeysInPlace, groups);
 
                             // Step 2: Run N pairs of odd-even passes to fix local inversions
                             int halfGroups = Mathf.CeilToInt((float)splatCount / (SortGroupSize * 2));
@@ -426,11 +437,11 @@ namespace GaussianSplatting
                             {
                                 // Even phase: compare-swap (0,1), (2,3), (4,5)...
                                 context.cmd.SetComputeIntParam(data.sortingShader, "_OddEvenPhase", 0);
-                                context.cmd.DispatchCompute(data.sortingShader, kernelOddEvenPass, halfGroups, 1, 1);
+                                DispatchLinear(data.sortingShader, kernelOddEvenPass, halfGroups);
 
                                 // Odd phase: compare-swap (1,2), (3,4), (5,6)...
                                 context.cmd.SetComputeIntParam(data.sortingShader, "_OddEvenPhase", 1);
-                                context.cmd.DispatchCompute(data.sortingShader, kernelOddEvenPass, halfGroups, 1, 1);
+                                DispatchLinear(data.sortingShader, kernelOddEvenPass, halfGroups);
                             }
 
                             framesSinceFullSort++;
@@ -479,7 +490,7 @@ namespace GaussianSplatting
                         context.cmd.SetComputeBufferParam(pc, kernelCalcSplatViewData, "_SHRest", component.SHRestBuffer);
 
                     resources.BindSplatViewDataOutput(context.cmd, pc, kernelCalcSplatViewData);
-                    context.cmd.DispatchCompute(pc, kernelCalcSplatViewData, groups, 1, 1);
+                    DispatchLinear(pc, kernelCalcSplatViewData, groups);
                 }
             }
 

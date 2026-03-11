@@ -69,6 +69,10 @@ float3 _ModelPosition;      // Model position offset
 float4 _ModelRotation;      // Model rotation quaternion (x,y,z,w)
 float3 _ModelScale;         // Model scale
 
+// 2D dispatch: number of thread groups in the X dimension.
+// Recovers linear thread index: idx = id.x + id.y * _DispatchGroupsX * GROUP_SIZE
+uint _DispatchGroupsX;
+
 // Convert local position to view space (applies model transform first)
 float3 LocalToView(float3 localPos)
 {
@@ -102,7 +106,7 @@ float ComputeDepthSortKey(float viewZ)
 [numthreads(GROUP_SIZE, 1, 1)]
 void InitSortBuffers(uint3 id : SV_DispatchThreadID)
 {
-    uint idx = id.x;
+    uint idx = id.x + id.y * _DispatchGroupsX * GROUP_SIZE;
     if (idx >= _SplatCount)
         return;
     
@@ -118,7 +122,7 @@ void InitSortBuffers(uint3 id : SV_DispatchThreadID)
 [numthreads(GROUP_SIZE, 1, 1)]
 void CalcViewData(uint3 id : SV_DispatchThreadID)
 {
-    uint idx = id.x;
+    uint idx = id.x + id.y * _DispatchGroupsX * GROUP_SIZE;
     if (idx >= _SplatCount)
         return;
     
@@ -149,7 +153,7 @@ void CalcViewData(uint3 id : SV_DispatchThreadID)
 [numthreads(GROUP_SIZE, 1, 1)]
 void CalcSortKeys(uint3 id : SV_DispatchThreadID)
 {
-    uint idx = id.x;
+    uint idx = id.x + id.y * _DispatchGroupsX * GROUP_SIZE;
     if (idx >= _SplatCount)
         return;
     
@@ -191,7 +195,7 @@ void CalcSortKeys(uint3 id : SV_DispatchThreadID)
 [numthreads(GROUP_SIZE, 1, 1)]
 void UpdateSortKeysInPlace(uint3 id : SV_DispatchThreadID)
 {
-    uint idx = id.x;
+    uint idx = id.x + id.y * _DispatchGroupsX * GROUP_SIZE;
     if (idx >= _SplatCount)
         return;
     
@@ -241,7 +245,7 @@ uint _OddEvenPhase; // 0 = even pairs, 1 = odd pairs
 void OddEvenPass(uint3 id : SV_DispatchThreadID)
 {
     // Each thread handles one compare-swap pair
-    uint pairIdx = id.x;
+    uint pairIdx = id.x + id.y * _DispatchGroupsX * GROUP_SIZE;
     
     // Compute the left element index based on phase
     uint left = pairIdx * 2 + _OddEvenPhase;

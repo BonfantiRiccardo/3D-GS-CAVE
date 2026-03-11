@@ -116,6 +116,7 @@ namespace GaussianSplatting
             private readonly GSRenderFeatureSettings settings;  //Settings for the render pass
             private const int SortGroupSize = 256;
             private const int RadixBins = 256;
+            private const int MaxDispatchGroupsPerDim = 65535;
             
             // Camera state caching for sort optimization
             private Vector3 lastCameraPosition;
@@ -261,6 +262,16 @@ namespace GaussianSplatting
                 EnsureSortKernels(data.sortingShader);
                 EnsurePrecomputeKernels(data.precomputeShader);
 
+                // Helper: dispatch a kernel using 2D thread groups so that the total
+                // group count can exceed the D3D 65,535-per-dimension limit.
+                void DispatchLinear(ComputeShader shader, int kernel, int totalGroups)
+                {
+                    int groupsX = Mathf.Min(totalGroups, MaxDispatchGroupsPerDim);
+                    int groupsY = (totalGroups + groupsX - 1) / groupsX;
+                    context.cmd.SetComputeIntParam(shader, "_DispatchGroupsX", groupsX);
+                    context.cmd.DispatchCompute(shader, kernel, groupsX, groupsY, 1);
+                }
+
                 for (int i = 0; i < data.components.Length; i++)
                 {
                     GSComponent component = data.components[i];
@@ -299,16 +310,16 @@ namespace GaussianSplatting
                         // Init sort buffers
                         resources.BindSortInputs(context.cmd, data.sortingShader, kernelInitSortBuffers);
                         component.BindToCompute(context.cmd, data.sortingShader, kernelInitSortBuffers);
-                        context.cmd.DispatchCompute(data.sortingShader, kernelInitSortBuffers, groups, 1, 1);
+                        DispatchLinear(data.sortingShader, kernelInitSortBuffers, groups);
 
                         // View data
                         resources.BindSortInputs(context.cmd, data.sortingShader, kernelCalcViewData);
                         component.BindToCompute(context.cmd, data.sortingShader, kernelCalcViewData);
-                        context.cmd.DispatchCompute(data.sortingShader, kernelCalcViewData, groups, 1, 1);
+                        DispatchLinear(data.sortingShader, kernelCalcViewData, groups);
 
                         // Sort keys
                         resources.BindSortInputs(context.cmd, data.sortingShader, kernelCalcSortKeys);
-                        context.cmd.DispatchCompute(data.sortingShader, kernelCalcSortKeys, groups, 1, 1);
+                        DispatchLinear(data.sortingShader, kernelCalcSortKeys, groups);
 
                         // Radix sort (4 passes)
                         context.cmd.SetComputeIntParam(data.sortingShader, "e_numKeys", splatCount);
@@ -370,7 +381,7 @@ namespace GaussianSplatting
                         context.cmd.SetComputeBufferParam(pc, kernelCalcSplatViewData, "_SHRest", component.SHRestBuffer);
 
                     resources.BindSplatViewDataOutput(context.cmd, pc, kernelCalcSplatViewData);
-                    context.cmd.DispatchCompute(pc, kernelCalcSplatViewData, groups, 1, 1);                    
+                    DispatchLinear(pc, kernelCalcSplatViewData, groups);                    
                 }
             }
 
