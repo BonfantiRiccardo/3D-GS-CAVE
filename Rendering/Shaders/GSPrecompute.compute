@@ -25,7 +25,9 @@ StructuredBuffer<float3> _Positions;        // World-space splat positions
 StructuredBuffer<float4> _Rotations;        // Splat rotations (quaternions)
 StructuredBuffer<float3> _Scales;           // Splat scales
 StructuredBuffer<float4> _SH;               // SH DC color (rgb) + opacity (a)
-StructuredBuffer<float> _SHRest;            // Higher SH bands coefficients
+StructuredBuffer<float> _SHRest0;           // SH band 1 (L=1): 9 floats per splat
+StructuredBuffer<float> _SHRest1;           // SH band 2 (L=2): 15 floats per splat
+StructuredBuffer<float> _SHRest2;           // SH band 3 (L=3): 21 floats per splat
 
 // Precomputed splat view data output (for efficient rendering)
 RWStructuredBuffer<SplatViewData> _SplatViewData;
@@ -49,7 +51,7 @@ float4 _VecScreenParams;    // x = width, y = height, z = 1/width, w = 1/height
 uint _SplatCount;            // Total number of splats
 float _SplatScale;           // Global splat scale multiplier
 int _SHBands;                // Number of SH bands (0-3)
-int _SHRestCount;            // Number of SH rest floats per splat
+// (Per-band SH rest counts are compile-time constants: 9, 15, 21)
 float3 _CameraWorldPos;     // Camera world position for view-dependent SH
 int _ColorSpaceMode;         // 0 = Auto (use Unity setting), 1 = ForceLinear, 2 = ForceGamma
 int _DebugPoints;            // 1 = render as uniform billboard points, 0 = normal splat rendering
@@ -108,9 +110,9 @@ void CalcSplatViewData(uint3 id : SV_DispatchThreadID)
     
     // Evaluate spherical harmonics for view-dependent color
     float3 rgb;
-    if (_SHBands > 0 && _SHRestCount > 0)
+    if (_SHBands > 0)
     {
-        rgb = EvaluateSH(shColor.rgb, _SHRest, _SHRestCount, physIdx, viewDir, _SHBands);
+        rgb = EvaluateSH(shColor.rgb, _SHRest0, _SHRest1, _SHRest2, physIdx, viewDir, _SHBands);
     }
     else
     {

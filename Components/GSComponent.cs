@@ -1,5 +1,4 @@
 /* External data loading through .bytes files inspired by aras-p/UnityGaussianSplatting */
-
 using System;
 using UnityEngine;
 using System.Text;
@@ -14,10 +13,10 @@ namespace GaussianSplatting
     {
         [Header("Quality Settings")]
         public GSAsset gsAsset;            // Reference to the GSAsset containing splat data
-        public int maxSplats = 1000000000;  //1 billion by default
+        public int maxSplats = 20000000;  //20 million by default
         
         [Header("Rendering")]
-        [Tooltip("Color space conversion mode for splat colors.\nAuto: uses Unity's current color space.\nForceLinear: always convert gamma→linear.\nForceGamma: no conversion (keep gamma).")]
+        [Tooltip("Color space conversion mode for splat colors.\nAuto: uses Unity's current color space.\nForceLinear: always convert gamma->linear.\nForceGamma: no conversion (keep gamma).")]
         public ColorSpaceMode colorSpaceMode = ColorSpaceMode.Auto;
 
         [Range(0.1f, 3.0f)]
@@ -74,8 +73,10 @@ namespace GaussianSplatting
         private ComputeBuffer rotationBuffer;
         private ComputeBuffer scaleBuffer;
         private ComputeBuffer shBuffer;
-        private ComputeBuffer shRestBuffer;
-        // Sorting resources for tile-based rendering
+        private ComputeBuffer shRestBuffer0;
+        private ComputeBuffer shRestBuffer1;
+        private ComputeBuffer shRestBuffer2;
+
         private GSSortingResources sortingResources;
 
         
@@ -84,7 +85,9 @@ namespace GaussianSplatting
         public ComputeBuffer RotationBuffer => rotationBuffer;
         public ComputeBuffer ScaleBuffer => scaleBuffer;
         public ComputeBuffer SHBuffer => shBuffer;
-        public ComputeBuffer SHRestBuffer => shRestBuffer;
+        public ComputeBuffer SHRestBuffer0 => shRestBuffer0;
+        public ComputeBuffer SHRestBuffer1 => shRestBuffer1;
+        public ComputeBuffer SHRestBuffer2 => shRestBuffer2;
         public GSSortingResources SortingResources => sortingResources;
 
         /// <summary>
@@ -127,8 +130,8 @@ namespace GaussianSplatting
 
         /// <summary>
         /// Builds the compute buffers for positions, rotation, scale, and SH based on the GSAsset data.
-        /// Uses metadata to decide what buffers are needed (no data loading), then loads data from external 
-        /// .bytes files or inline byte[] only when uploading to GPU.
+        /// Uses metadata to decide what buffers are needed, and loads data from external .bytes files to fill the buffers. 
+        /// Called on enable and when validating in the editor.
         /// </summary>
         void BuildBuffers()
         {
@@ -146,14 +149,14 @@ namespace GaussianSplatting
             }
 
             // Use metadata to determine what data exists (no file loading)
-            bool useSHRest = gsAsset.SHRestCount > 0;
+            int shBands = ShBandsNumber;
 
             bool needsRebuild = positionBuffer == null || rotationBuffer == null || scaleBuffer == null ||
                                 positionBuffer.count != splatCount ||
                                 rotationBuffer.count != splatCount ||
                                 scaleBuffer.count != splatCount ||
                                 shBuffer == null || shBuffer.count != splatCount ||
-                                (useSHRest && (shRestBuffer == null || shRestBuffer.count != splatCount));
+                                (shBands >= 1 && (shRestBuffer0 == null || shRestBuffer0.count != splatCount * ChunkedGSAsset.SHBand1Count));
 
             if (!needsRebuild) 
             {
@@ -167,10 +170,11 @@ namespace GaussianSplatting
             rotationBuffer = new ComputeBuffer(splatCount, sizeof(float) * 4);
             scaleBuffer = new ComputeBuffer(splatCount, sizeof(float) * 3);
             shBuffer = new ComputeBuffer(splatCount, sizeof(float) * 4);
-            if (useSHRest)
-            {
-                shRestBuffer = new ComputeBuffer(splatCount, sizeof(float) * gsAsset.SHRestCount);
-            }
+            // Always allocate all 3 per-band buffers (1-element dummy when unused) so the compute shader binding is always satisfied.
+            // Use float stride (4) to match StructuredBuffer<float> / RWStructuredBuffer<float> in shaders.
+            shRestBuffer0 = new ComputeBuffer(shBands >= 1 ? splatCount * ChunkedGSAsset.SHBand1Count : 1, sizeof(float));
+            shRestBuffer1 = new ComputeBuffer(shBands >= 2 ? splatCount * ChunkedGSAsset.SHBand2Count : 1, sizeof(float));
+            shRestBuffer2 = new ComputeBuffer(shBands >= 3 ? splatCount * ChunkedGSAsset.SHBand3Count : 1, sizeof(float));
 
             // Load byte[] data from external .bytes files and upload to GPU
             byte[] posData = gsAsset.PositionData;
@@ -192,11 +196,34 @@ namespace GaussianSplatting
             if (shDCData != null && shDCData.Length >= splatCount * 16)
                 shBuffer.SetData(shDCData);
 
-            if (useSHRest && shRestBuffer != null)
+            if (shBands >= 1)
             {
                 byte[] shRData = gsAsset.SHRestData;
-                if (shRData != null && shRData.Length >= splatCount * gsAsset.SHRestCount * 4)
-                    shRestBuffer.SetData(shRData);
+                if (shRData != null)
+                {
+                    int totalBytesPerSplat = gsAsset.SHRestCount * sizeof(float);
+                    int band1B = ChunkedGSAsset.SHBand1Stride;
+                    int band2B = ChunkedGSAsset.SHBand2Stride;
+                    int band3B = ChunkedGSAsset.SHBand3Stride;
+
+                    byte[] b1 = new byte[splatCount * band1B];
+                    byte[] b2 = shBands >= 2 ? new byte[splatCount * band2B] : null;
+                    byte[] b3 = shBands >= 3 ? new byte[splatCount * band3B] : null;
+
+                    for (int i = 0; i < splatCount; i++)
+                    {
+                        int src = i * totalBytesPerSplat;
+                        Buffer.BlockCopy(shRData, src, b1, i * band1B, band1B);
+                        if (b2 != null)
+                            Buffer.BlockCopy(shRData, src + band1B, b2, i * band2B, band2B);
+                        if (b3 != null)
+                            Buffer.BlockCopy(shRData, src + band1B + band2B, b3, i * band3B, band3B);
+                    }
+
+                    shRestBuffer0.SetData(b1);
+                    if (shRestBuffer1 != null) shRestBuffer1.SetData(b2);
+                    if (shRestBuffer2 != null) shRestBuffer2.SetData(b3);
+                }
             }
         }
 
@@ -236,11 +263,9 @@ namespace GaussianSplatting
                 shBuffer.Release();
                 shBuffer = null;
             }
-            if (shRestBuffer != null)
-            {
-                shRestBuffer.Release();
-                shRestBuffer = null;
-            }
+            if (shRestBuffer0 != null) { shRestBuffer0.Release(); shRestBuffer0 = null; }
+            if (shRestBuffer1 != null) { shRestBuffer1.Release(); shRestBuffer1 = null; }
+            if (shRestBuffer2 != null) { shRestBuffer2.Release(); shRestBuffer2 = null; }
         }
 
         /// <summary>
@@ -272,43 +297,6 @@ namespace GaussianSplatting
             {
                 sortingResources.Dispose();
                 sortingResources = null;
-            }
-        }
-
-        /// <summary>
-        /// Binds the compute buffers to the given material for rendering.
-        /// </summary>
-        public void BindTo(Material material)
-        {
-            if (positionBuffer != null)
-            {
-                material.SetBuffer("_Positions", positionBuffer);
-            }
-
-            if (rotationBuffer != null)
-            {
-                material.SetBuffer("_Rotations", rotationBuffer);
-            }
-
-            if (scaleBuffer != null)
-            {
-                material.SetBuffer("_Scales", scaleBuffer);
-            }
-            // Always bind SH buffer if it exists (contains DC color + opacity)
-            // ShBandsNumber only counts higher bands, but we need DC even with 0 bands
-            if (shBuffer != null)
-            {
-                material.SetBuffer("_SH", shBuffer);
-            }
-            if (ShBandsNumber > 1 && shRestBuffer != null)
-            {
-                material.SetBuffer("_SHRest", shRestBuffer);
-                material.SetInt("_SHRestCount", gsAsset.SHRestCount);
-            }
-
-            if (gsAsset != null)
-            {
-                material.SetInt("_SplatCount", Mathf.Min(gsAsset.splatCount, maxSplats));
             }
         }
 

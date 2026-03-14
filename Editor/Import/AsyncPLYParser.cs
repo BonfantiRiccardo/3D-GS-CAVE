@@ -702,7 +702,7 @@ namespace GaussianSplatting.Editor
 
                     // Convert from linear color space to SH DC representation
                     // so the downstream rendering pipeline receives consistent data.
-                    // SH0ToColor: color = dc0 * C0 + 0.5  →  dc0 = (color - 0.5) / C0
+                    // SH0ToColor: color = dc0 * C0 + 0.5  ->  dc0 = (color - 0.5) / C0
                     sh0 = (sh0 - 0.5f) / SH_C0;
                     sh1 = (sh1 - 0.5f) / SH_C0;
                     sh2 = (sh2 - 0.5f) / SH_C0;

@@ -31,6 +31,18 @@ namespace GaussianSplatting
         [Tooltip("Show the overlay on start.")]
         public bool showOnStart = true;
 
+        [Header("Camera")]
+        [Tooltip("Optional camera to track for speed metrics. If null, uses Camera.main.")]
+        public Camera cameraOverride;
+
+        [Tooltip("Minimum movement (meters) to consider the camera moving.")]
+        [Range(0f, 0.5f)]
+        public float linearMoveEpsilon = 0.001f;
+
+        [Tooltip("Minimum rotation (degrees) to consider the camera rotating.")]
+        [Range(0f, 5f)]
+        public float angularMoveEpsilon = 0.05f;
+
         [Header("Appearance")]
         [Tooltip("Font size in pixels.")]
         [Range(10, 32)]
@@ -62,10 +74,16 @@ namespace GaussianSplatting
         private int frameCount;
         private float fps;
         private float frameTimeMs;
+        private float cameraLinearSpeed;
+        private float cameraAngularSpeed;
         private string statsText = string.Empty;
         private GUIStyle boxStyle;
         private GUIStyle labelStyle;
         private Texture2D bgTexture;
+
+        private Vector3 lastCamPosition;
+        private Quaternion lastCamRotation = Quaternion.identity;
+        private bool hasCameraSample;
 
         // Reusable string builder to avoid GC allocs every refresh
         private readonly StringBuilder sb = new StringBuilder(512);
@@ -96,6 +114,8 @@ namespace GaussianSplatting
         void Update()
         {
             HandleToggleInput();
+
+            UpdateCameraSpeed();
 
             if (!visible) return;
 
@@ -244,6 +264,7 @@ namespace GaussianSplatting
 
             // System info
             sb.AppendLine($"Resolution: {Screen.width}x{Screen.height}");
+            sb.AppendLine($"Camera Speed: {cameraLinearSpeed:F2} m/s  {cameraAngularSpeed:F1} deg/s");
             sb.Append($"GPU: {SystemInfo.graphicsDeviceName}");
 
             statsText = sb.ToString();
@@ -308,6 +329,44 @@ namespace GaussianSplatting
                 return new Rect(0f, 0f, Screen.width, Screen.height);
 
             return new Rect(0f, 0f, Screen.width * 0.5f, Screen.height);
+        }
+
+        private void UpdateCameraSpeed()
+        {
+            var cam = cameraOverride != null ? cameraOverride : Camera.main;
+            if (cam == null)
+            {
+                cameraLinearSpeed = 0f;
+                cameraAngularSpeed = 0f;
+                hasCameraSample = false;
+                return;
+            }
+
+            float dt = Time.unscaledDeltaTime;
+            if (dt <= 0f)
+                return;
+
+            Vector3 pos = cam.transform.position;
+            Quaternion rot = cam.transform.rotation;
+
+            if (!hasCameraSample)
+            {
+                lastCamPosition = pos;
+                lastCamRotation = rot;
+                hasCameraSample = true;
+                cameraLinearSpeed = 0f;
+                cameraAngularSpeed = 0f;
+                return;
+            }
+
+            float distance = Vector3.Distance(pos, lastCamPosition);
+            float angle = Quaternion.Angle(lastCamRotation, rot);
+
+            cameraLinearSpeed = distance >= linearMoveEpsilon ? distance / dt : 0f;
+            cameraAngularSpeed = angle >= angularMoveEpsilon ? angle / dt : 0f;
+
+            lastCamPosition = pos;
+            lastCamRotation = rot;
         }
     }
 }

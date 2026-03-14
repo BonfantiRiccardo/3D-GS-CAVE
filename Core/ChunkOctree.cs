@@ -7,8 +7,7 @@ namespace GaussianSplatting
     /// <summary>
     /// A serializable, flat-array octree built over chunk AABBs at import time. Each internal node stores a 
     /// tight AABB enclosing all descendant chunks. Leaf nodes reference a contiguous range of chunk indices.
-    /// Nodes are stored breadth-first in a flat array. At runtime the tree is traversed top-down against 
-    /// frustum planes, pruning entire sub-trees when a node's AABB is fully outside.
+    /// Nodes are stored breadth-first in a flat array.
     /// Construction: top-down recursive subdivision. At each level, chunks whose AABB centre falls inside each 
     /// octant are assigned to that child.
     /// </summary>
@@ -43,12 +42,7 @@ namespace GaussianSplatting
         /// <summary>
         /// Recursive top-down octree construction. Returns the index of the node it just created in <paramref name="nodes"/>.
         /// </summary>
-        private static int BuildNode(
-            ChunkInfo[] chunks,
-            List<int> chunkIndices,
-            Bounds bounds,
-            int depth,
-            List<ChunkOctreeNode> nodes)
+        private static int BuildNode( ChunkInfo[] chunks, List<int> chunkIndices, Bounds bounds, int depth, List<ChunkOctreeNode> nodes)
         {
             // Reserve a slot for this node (we'll fill in children later)
             int thisIndex = nodes.Count;
@@ -75,7 +69,7 @@ namespace GaussianSplatting
             Vector3 center = bounds.center;
             Vector3 halfSize = bounds.size * 0.5f;
 
-            // Bin chunks into octants by their AABB centre
+            // Group chunks into octants by their AABB centre
             var childBins = new List<int>[8];
             for (int o = 0; o < 8; o++)
                 childBins[o] = new List<int>();
@@ -151,7 +145,7 @@ namespace GaussianSplatting
 
         /// <summary>
         /// Computes spatial bounds for an octant given the parent's centre and half-size.
-        /// Octant numbering: bit 0 = x >= centre, bit 1 = y >= centre, bit 2 = z >= centre.
+        /// Octant numbering: bit 0 = (x >= centre), bit 1 = (y >= centre), bit 2 = (z >= centre).
         /// </summary>
         private static Bounds OctantBounds(Vector3 parentCenter, Vector3 halfSize, int octant)
         {
@@ -246,7 +240,7 @@ namespace GaussianSplatting
         /// <summary>Index of the first child in the flat node array (-1 for leaf nodes).</summary>
         public int firstChild;
 
-        /// <summary>Reserved for future flat-array packing. Currently unused.</summary>
+        /// <summary>Start index of chunks in this node (for leaf nodes).</summary>
         public int chunkStart;
 
         /// <summary>Number of chunks in a leaf node (0 for internal nodes).</summary>

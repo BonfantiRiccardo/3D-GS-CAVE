@@ -5,21 +5,17 @@ namespace GaussianSplatting
 {
     /// <summary>
     /// ChunkInfo contains metadata for a single spatial chunk of Gaussian splats.
-    /// Chunks are used for frustum culling and streaming, allowing the renderer
-    /// to load only visible portions of very large splat scenes.
+    /// Chunks are used for frustum culling and streaming, allowing the renderer to load only visible portions of very large splat scenes.
     /// </summary>
     [Serializable]
     public struct ChunkInfo
     {
         /// <summary>
-        /// Axis aligned bounding box for this chunk in local model space.
-        /// Used for frustum culling tests.
+        /// Axis aligned bounding box for this chunk in local model space. Used for frustum culling tests.
         /// </summary>
         public Bounds bounds;
 
-        /// <summary>
-        /// Number of splats contained in this chunk.
-        /// </summary>
+        /// <summary> Number of splats contained in this chunk. </summary>
         public int splatCount;
 
         /// <summary>
@@ -31,8 +27,7 @@ namespace GaussianSplatting
         /// <summary>
         /// Byte offset into each data file where this chunk's data begins.
         /// For positions.bytes: offset = startIndex * 12
-        /// For rotations.bytes: offset = startIndex * 16
-        /// etc.
+        /// For rotations.bytes: offset = startIndex * 16 ...
         /// </summary>
         public long dataOffset;
 
@@ -75,46 +70,6 @@ namespace GaussianSplatting
             );
 
             return new Bounds(center, newExtents * 2f);
-        }
-    }
-
-    /// <summary>
-    /// ChunkLoadState tracks the runtime state of a chunk for the streaming system.
-    /// </summary>
-    public enum ChunkLoadState
-    {
-        /// <summary>
-        /// Chunk data is not loaded and not requested.
-        /// </summary>
-        Unloaded,
-
-        /// <summary>
-        /// Chunk data load has been requested and is in progress.
-        /// </summary>
-        Loading,
-
-        /// <summary>
-        /// Chunk data is fully loaded and resident in GPU memory.
-        /// </summary>
-        Loaded
-    }
-
-    /// <summary>
-    /// RuntimeChunkInfo extends ChunkInfo with runtime state for the streaming system.
-    /// </summary>
-    public class RuntimeChunkInfo
-    {
-        public ChunkInfo metadata;
-        public ChunkLoadState state;
-        public int bufferStartIndex;  // Where this chunk's data starts in the consolidated GPU buffer
-        public int lastVisibleFrame;  // Frame number when last visible (for LRU eviction)
-
-        public RuntimeChunkInfo(ChunkInfo info)
-        {
-            metadata = info;
-            state = ChunkLoadState.Unloaded;
-            bufferStartIndex = -1;
-            lastVisibleFrame = -1;
         }
     }
 }

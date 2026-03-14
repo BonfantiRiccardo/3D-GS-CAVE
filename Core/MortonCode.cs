@@ -3,10 +3,8 @@ using UnityEngine;
 namespace GaussianSplatting
 {
     /// <summary>
-    /// Provides utilities for computing Morton codes (Z-order curve indices) from 3D positions. 
-    /// Morton codes map 3D points to 1D indices while preserving spatial locality.
-    /// This is used to spatially sort splats so that each chunk contains spatially
-    /// coherent splats, enabling efficient frustum culling at the chunk level.
+    /// Provides utilities for computing Morton codes (Z-order curve indices) from 3D positions. Map 3D points to 1D indices while preserving 
+    /// spatial locality. This is used to spatially sort splats, enabling efficient frustum culling at the chunk level.
     /// </summary>
     public static class MortonCode
     {
@@ -20,8 +18,7 @@ namespace GaussianSplatting
         /// <returns>A 32 bit Morton code (only lower 30 bits used).</returns>
         public static uint Encode(Vector3 position, Vector3 boundsMin, Vector3 boundsSize)
         {
-            // Normalize position to [0,1] within bounds
-            // Avoid division by zero for degenerate bounds
+            // Normalize position to [0,1] within bounds. Avoid division by zero for degenerate bounds
             float nx = boundsSize.x > 0f ? (position.x - boundsMin.x) / boundsSize.x : 0f;
             float ny = boundsSize.y > 0f ? (position.y - boundsMin.y) / boundsSize.y : 0f;
             float nz = boundsSize.z > 0f ? (position.z - boundsMin.z) / boundsSize.z : 0f;
@@ -41,16 +38,14 @@ namespace GaussianSplatting
         }
 
         /// <summary>
-        /// Spreads out the lower 10 bits of a value across a 30 bit result,
-        /// placing each bit in every third position.
+        /// Spreads out the lower 10 bits of a value across a 30 bit result, placing each bit in every third position.
         /// </summary>
         private static uint SpreadBits3(uint x)
         {
             // Mask to lower 10 bits
             x &= 0x000003FFu;
 
-            // Spread bits using magic numbers
-            // This uses the standard Morton bit interleaving technique
+            // Spread bits using the standard Morton bit interleaving technique
             x = (x | (x << 16)) & 0x030000FFu;
             x = (x | (x << 8)) & 0x0300F00Fu;
             x = (x | (x << 4)) & 0x030C30C3u;
@@ -59,17 +54,13 @@ namespace GaussianSplatting
             return x;
         }
 
-        /// <summary>
-        /// Interleaves three 10 bit values into a 30 bit Morton code.
-        /// </summary>
+        /// <summary> Interleaves three 10 bit values into a 30 bit Morton code. </summary>
         private static uint Interleave3(uint x, uint y, uint z)
         {
             return SpreadBits3(x) | (SpreadBits3(y) << 1) | (SpreadBits3(z) << 2);
         }
 
-        /// <summary>
-        /// Computes Morton codes for an array of positions and returns sorted indices.
-        /// </summary>
+        /// <summary> Computes Morton codes for an array of positions and returns sorted indices. </summary>
         /// <param name="positions">Array of positions to sort.</param>
         /// <param name="bounds">Bounding box containing all positions.</param>
         /// <returns>Array of indices that would sort the positions by Morton code.</returns>

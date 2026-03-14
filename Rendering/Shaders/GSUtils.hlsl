@@ -21,23 +21,23 @@ static const float SH_C0 = 0.28209479177387814;
 
 // higher bands
 // SH_C1 = sqrt(3) / (2 * sqrt(pi)) ≈ 0.4886025
-static const float SH_C1 = 0.4886025;
+static const float SH_C1 = 0.4886025119029199;
 
 // Band 2 coefficients
-static const float SH_C2_0 = 1.0925484;   // sqrt(15) / (2 * sqrt(pi))
-static const float SH_C2_1 = -1.0925484;  // -sqrt(15) / (2 * sqrt(pi))
-static const float SH_C2_2 = 0.3153916;   // sqrt(5) / (4 * sqrt(pi))
-static const float SH_C2_3 = -1.0925484;  // -sqrt(15) / (2 * sqrt(pi))
-static const float SH_C2_4 = 0.5462742;   // sqrt(15) / (4 * sqrt(pi))
+static const float SH_C2_0 = 1.0925484305920792;   // sqrt(15) / (2 * sqrt(pi))
+static const float SH_C2_1 = -1.0925484305920792;  // -sqrt(15) / (2 * sqrt(pi))
+static const float SH_C2_2 = 0.31539156525252005;   // sqrt(5) / (4 * sqrt(pi))
+static const float SH_C2_3 = -1.0925484305920792;  // -sqrt(15) / (2 * sqrt(pi))
+static const float SH_C2_4 = 0.5462742152960396;   // sqrt(15) / (4 * sqrt(pi))
 
 // Band 3 coefficients
-static const float SH_C3_0 = -0.5900436;
-static const float SH_C3_1 = 2.8906114;
-static const float SH_C3_2 = -0.4570458;
-static const float SH_C3_3 = 0.3731763;
-static const float SH_C3_4 = -0.4570458;
-static const float SH_C3_5 = 1.4453057;
-static const float SH_C3_6 = -0.5900436;
+static const float SH_C3_0 = -0.5900435899266435;
+static const float SH_C3_1 = 2.890611442640554;
+static const float SH_C3_2 = -0.4570457994644658;
+static const float SH_C3_3 = 0.3731763325901154;
+static const float SH_C3_4 = -0.4570457994644658;
+static const float SH_C3_5 = 1.445305721320277;
+static const float SH_C3_6 = -0.5900435899266435;
 
 
 
@@ -154,94 +154,78 @@ float3 GammaToLinear(float3 color)
 // Spherical Harmonics view-dependent color computation
 // Based on aras-p/UnityGaussianSplatting implementation - https://github.com/aras-p/UnityGaussianSplatting
 // SPDX-License-Identifier: MIT
+//
+// Multi-bank layout: SH rest data is split into three separate buffers (one per band) so that each stays under the 2 GB structured-buffer limit.
 float3 EvaluateSH(
     float3 sh_dc,
-    StructuredBuffer<float> shRest,
-    int shRestCount,
+    StructuredBuffer<float> shRest0,
+    StructuredBuffer<float> shRest1,
+    StructuredBuffer<float> shRest2,
     uint splatIndex,
     float3 viewDir,
     int shOrder)
 {
     // Start with DC term (band 0): col = sh0 * SH_C0 + 0.5
     float3 result = sh_dc * SH_C0 + 0.5;
-    
-    // If no higher bands, return DC only
-    if (shOrder < 1 || shRestCount <= 0)
-    {
+
+    if (shOrder < 1)
         return saturate(result);
-    }
-    
-    // View direction components (negated as per convention)
-    // The negation matches the 3DGS convention where we evaluate at -viewDir
+
+    // View direction components (negated as per 3DGS convention)
     float3 dir = -viewDir;
     float x = dir.x;
     float y = dir.y;
     float z = dir.z;
-    
-    // Base offset into shRest for this splat
-    uint baseIdx = splatIndex * (uint)shRestCount;
-    
-    // Band 1 (3 coefficients per color channel = 9 floats total)
-    // SH basis functions: Y_1^{-1} = y, Y_1^0 = z, Y_1^1 = x
-    if (shOrder >= 1 && shRestCount >= 9)
+
+    // Band 1 (9 floats in shRest0)
+    //Base offset for this splat's SH rest coefficients in the band 1 buffer
+    uint b1 = splatIndex * 9u;
+    float3 sh1 = float3(shRest0[b1 + 0], shRest0[b1 + 1], shRest0[b1 + 2]);
+    float3 sh2 = float3(shRest0[b1 + 3], shRest0[b1 + 4], shRest0[b1 + 5]);
+    float3 sh3 = float3(shRest0[b1 + 6], shRest0[b1 + 7], shRest0[b1 + 8]);
+    result += SH_C1 * (-sh1 * y + sh2 * z - sh3 * x);
+
+    // Band 2 (15 floats in shRest1)
+    if (shOrder >= 2)
     {
-        // sh1, sh2, sh3 for RGB
-        float3 sh1 = float3(shRest[baseIdx + 0], shRest[baseIdx + 1], shRest[baseIdx + 2]);
-        float3 sh2 = float3(shRest[baseIdx + 3], shRest[baseIdx + 4], shRest[baseIdx + 5]);
-        float3 sh3 = float3(shRest[baseIdx + 6], shRest[baseIdx + 7], shRest[baseIdx + 8]);
-        
-        result += SH_C1 * (-sh1 * y + sh2 * z - sh3 * x);
+        float xx = x * x, yy = y * y, zz = z * z;
+        float xy = x * y, yz = y * z, xz = x * z;
 
-        
-        // Band 2 (5 coefficients per color channel = 15 floats, total offset: 9)
-        if (shOrder >= 2 && shRestCount >= 24)
+        uint b2 = splatIndex * 15u;
+        float3 sh4 = float3(shRest1[b2 +  0], shRest1[b2 +  1], shRest1[b2 +  2]);
+        float3 sh5 = float3(shRest1[b2 +  3], shRest1[b2 +  4], shRest1[b2 +  5]);
+        float3 sh6 = float3(shRest1[b2 +  6], shRest1[b2 +  7], shRest1[b2 +  8]);
+        float3 sh7 = float3(shRest1[b2 +  9], shRest1[b2 + 10], shRest1[b2 + 11]);
+        float3 sh8 = float3(shRest1[b2 + 12], shRest1[b2 + 13], shRest1[b2 + 14]);
+
+        result += (SH_C2_0 * xy) * sh4 +
+                  (SH_C2_1 * yz) * sh5 +
+                  (SH_C2_2 * (2.0 * zz - xx - yy)) * sh6 +
+                  (SH_C2_3 * xz) * sh7 +
+                  (SH_C2_4 * (xx - yy)) * sh8;
+
+        // Band 3 (21 floats in shRest2)
+        if (shOrder >= 3)
         {
-            float xx = x * x;
-            float yy = y * y;
-            float zz = z * z;
-            float xy = x * y;
-            float yz = y * z;
-            float xz = x * z;
-            
-            float3 sh4 = float3(shRest[baseIdx + 9], shRest[baseIdx + 10], shRest[baseIdx + 11]);
-            float3 sh5 = float3(shRest[baseIdx + 12], shRest[baseIdx + 13], shRest[baseIdx + 14]);
-            float3 sh6 = float3(shRest[baseIdx + 15], shRest[baseIdx + 16], shRest[baseIdx + 17]);
-            float3 sh7 = float3(shRest[baseIdx + 18], shRest[baseIdx + 19], shRest[baseIdx + 20]);
-            float3 sh8 = float3(shRest[baseIdx + 21], shRest[baseIdx + 22], shRest[baseIdx + 23]);
-            
-            result += (SH_C2_0 * xy) * sh4 +
-                    (SH_C2_1 * yz) * sh5 +
-                    (SH_C2_2 * (2.0 * zz - xx - yy)) * sh6 +
-                    (SH_C2_3 * xz) * sh7 +
-                    (SH_C2_4 * (xx - yy)) * sh8;
+            uint b3 = splatIndex * 21u;
+            float3 sh9  = float3(shRest2[b3 +  0], shRest2[b3 +  1], shRest2[b3 +  2]);
+            float3 sh10 = float3(shRest2[b3 +  3], shRest2[b3 +  4], shRest2[b3 +  5]);
+            float3 sh11 = float3(shRest2[b3 +  6], shRest2[b3 +  7], shRest2[b3 +  8]);
+            float3 sh12 = float3(shRest2[b3 +  9], shRest2[b3 + 10], shRest2[b3 + 11]);
+            float3 sh13 = float3(shRest2[b3 + 12], shRest2[b3 + 13], shRest2[b3 + 14]);
+            float3 sh14 = float3(shRest2[b3 + 15], shRest2[b3 + 16], shRest2[b3 + 17]);
+            float3 sh15 = float3(shRest2[b3 + 18], shRest2[b3 + 19], shRest2[b3 + 20]);
 
-             
-            // Band 3 (7 coefficients per color channel = 21 floats, total offset: 24)
-            if (shOrder >= 3 && shRestCount >= 45)
-            {
-                float xx = x * x;
-                float yy = y * y;
-                float zz = z * z;
-                
-                float3 sh9  = float3(shRest[baseIdx + 24], shRest[baseIdx + 25], shRest[baseIdx + 26]);
-                float3 sh10 = float3(shRest[baseIdx + 27], shRest[baseIdx + 28], shRest[baseIdx + 29]);
-                float3 sh11 = float3(shRest[baseIdx + 30], shRest[baseIdx + 31], shRest[baseIdx + 32]);
-                float3 sh12 = float3(shRest[baseIdx + 33], shRest[baseIdx + 34], shRest[baseIdx + 35]);
-                float3 sh13 = float3(shRest[baseIdx + 36], shRest[baseIdx + 37], shRest[baseIdx + 38]);
-                float3 sh14 = float3(shRest[baseIdx + 39], shRest[baseIdx + 40], shRest[baseIdx + 41]);
-                float3 sh15 = float3(shRest[baseIdx + 42], shRest[baseIdx + 43], shRest[baseIdx + 44]);
-                
-                result += (SH_C3_0 * y * (3.0 * xx - yy)) * sh9 +
-                        (SH_C3_1 * xy * z) * sh10 +
-                        (SH_C3_2 * y * (4.0 * zz - xx - yy)) * sh11 +
-                        (SH_C3_3 * z * (2.0 * zz - 3.0 * xx - 3.0 * yy)) * sh12 +
-                        (SH_C3_4 * x * (4.0 * zz - xx - yy)) * sh13 +
-                        (SH_C3_5 * z * (xx - yy)) * sh14 +
-                        (SH_C3_6 * x * (xx - 3.0 * yy)) * sh15;
-            }
+            result += (SH_C3_0 * y * (3.0 * xx - yy)) * sh9 +
+                      (SH_C3_1 * xy * z) * sh10 +
+                      (SH_C3_2 * y * (4.0 * zz - xx - yy)) * sh11 +
+                      (SH_C3_3 * z * (2.0 * zz - 3.0 * xx - 3.0 * yy)) * sh12 +
+                      (SH_C3_4 * x * (4.0 * zz - xx - yy)) * sh13 +
+                      (SH_C3_5 * z * (xx - yy)) * sh14 +
+                      (SH_C3_6 * x * (xx - 3.0 * yy)) * sh15;
         }
     }
-    
+
     return max(result, 0);
 }
 

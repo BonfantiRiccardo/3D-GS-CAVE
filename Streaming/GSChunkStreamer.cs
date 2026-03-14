@@ -10,17 +10,19 @@ using UnityEngine;
 namespace GaussianSplatting
 {
     /// <summary>
-    /// GPU pool based chunk streamer with async I/O, CPU staging arrays, and batched GPU upload.
-    /// - Fixed GPU pool: ComputeBuffers are allocated once at startup and divided into chunk sized slots. 
-    ///   Slots are managed via a free list: loading a chunk pops a slot, evicting a chunk pushes the slot back. 
-    /// - Async I/O: a dedicated background thread owns its own file handles and reads chunk data from disk. 
-    ///   Completed reads are copied into CPU staging arrays (pure memcpy, no GPU calls).
-    /// - Batched GPU upload: all per-frame changes are flushed in at most 6 SetData calls 
-    ///   (5 attribute buffers + 1 remap), regardless of how many chunks changed.
-    /// - Indirection buffer (remap): because slots are non contiguous, indexing is abstracted. 
-    ///   A uint remap buffer maps each logical splat index to its physical position in the pool.
+    /// GPU pool-based chunk streamer with async I/O, pooled read buffers, and scatter-based GPU upload.
+    /// - Fixed GPU pool: ComputeBuffers are allocated once at startup and divided into chunk-sized slots.
+    ///   A free-list manages slots; loading pops a slot, eviction returns it.
+    /// - Async I/O thread: a dedicated background thread owns file handles and reads chunk data on demand.
+    ///   SH rest data is de-interleaved into per-band arrays on the I/O thread.
+    /// - Pooled read buffers: byte[] arrays are rented/returned by size to reduce GC churn; the last chunk
+    ///   may be smaller and uses its own size bucket.
+    /// - Batched upload: completed reads are compacted into per-frame “patch” batches, then uploaded via
+    ///   LockBufferForWrite and scatter compute dispatch.
+    /// - Remap indirection: a uint remap buffer maps logical splat indices to physical pool positions,
+    ///   updated in a compact dirty range via SetBufferData.
     /// </summary>
-    public class GSChunkStreamer : IDisposable
+    public partial class GSChunkStreamer : IDisposable
     {
         // Per chunk lifecycle states for the slot pipeline
         private enum SlotState
@@ -53,10 +55,10 @@ namespace GaussianSplatting
         private struct ReadRequest
         {
             public int chunkIndex;
-            public int slotIndex;
+            public int slotIndex;   //
         }
 
-        // Result returned from the background thread with staging data
+        // Result returned from the background thread with pre-split staging data
         private struct ReadResult
         {
             public int chunkIndex;
@@ -65,7 +67,9 @@ namespace GaussianSplatting
             public byte[] rotations;
             public byte[] scales;
             public byte[] sh;
-            public byte[] shRest;
+            public byte[] shBand1;   // L=1 pre-split on IO thread, null when shBands < 1
+            public byte[] shBand2;   // L=2 pre-split on IO thread, null when shBands < 2
+            public byte[] shBand3;   // L=3 pre-split on IO thread, null when shBands < 3
             public bool ok;
             public string error;
         }
@@ -85,31 +89,20 @@ namespace GaussianSplatting
         private readonly int evictionDelayFrames;
 
 
-        // GPU pool buffers (allocated once, never reallocated)
+        // GPU pool buffers (allocated once)
         private ComputeBuffer positionBuffer;
         private ComputeBuffer rotationBuffer;
         private ComputeBuffer scaleBuffer;
         private ComputeBuffer shBuffer;
-        private ComputeBuffer shRestBuffer;
+        private ComputeBuffer shRestBuffer0;  // Band 1 (L=1): full pool when bands >= 1, else 1-element dummy
+        private ComputeBuffer shRestBuffer1;  // Band 2 (L=2): full pool when bands >= 2, else 1-element dummy
+        private ComputeBuffer shRestBuffer2;  // Band 3 (L=3): full pool when bands >= 3, else 1-element dummy
 
         // Indirection / remap buffer
         private readonly uint[] remapCPU;
         private ComputeBuffer remapGPU;
 
-        // CPU staging arrays — pre-allocated mirrors of the full GPU pool.
-        // Chunk data is copied here on the main thread (CPU memcpy only), then
-        // flushed to the GPU in at most 6 SetData calls per frame.
-        private readonly byte[] stagingPositions;
-        private readonly byte[] stagingRotations;
-        private readonly byte[] stagingScales;
-        private readonly byte[] stagingSH;
-        private readonly byte[] stagingSHRest;   // null when SH rest stride is 0
-
-        // Per-frame dirty tracking 
-        private readonly HashSet<int> dirtySlots = new HashSet<int>();
-        private readonly List<int> dirtySlotsTemp = new List<int>(); // scratch for sorted iteration
-
-        // Per-frame dirty tracking — remap index range
+        // Per-frame dirty tracking: remap index range
         private int dirtyRemapMin = int.MaxValue;
         private int dirtyRemapMax = -1;
 
@@ -121,7 +114,7 @@ namespace GaussianSplatting
 
         // Async I/O infrastructure
         private readonly ConcurrentQueue<ReadRequest> requestQueue;
-        private readonly ConcurrentQueue<ReadResult> completionQueue;
+        private readonly ConcurrentQueue<ReadResult> completionQueue; //
         private Thread ioThread;
         private volatile bool ioThreadRunning;
         private readonly ManualResetEventSlim ioWakeEvent;
@@ -133,6 +126,7 @@ namespace GaussianSplatting
         private readonly string shFilePath;
         private readonly string shRestFilePath;
         private readonly int shRestStride;
+        private readonly int shBands;
 
         // Frustum planes (scratch, reused each frame)
         private readonly Plane[] basePlanes;
@@ -151,8 +145,8 @@ namespace GaussianSplatting
 
         // Current state
         private int currentActiveSplatCount;
-        private int lastProcessedFrame = -1;
-        private int lastCameraID = -1;
+        private int lastCompletionDrainFrame = -1;
+        private readonly HashSet<int> camerasProcessedThisFrame = new HashSet<int>();
         private bool bufferContentsDirty;
 
         // Statistics
@@ -173,7 +167,9 @@ namespace GaussianSplatting
         public ComputeBuffer RotationBuffer => rotationBuffer;
         public ComputeBuffer ScaleBuffer => scaleBuffer;
         public ComputeBuffer SHBuffer => shBuffer;
-        public ComputeBuffer SHRestBuffer => shRestBuffer;
+        public ComputeBuffer SHRestBuffer0 => shRestBuffer0;
+        public ComputeBuffer SHRestBuffer1 => shRestBuffer1;
+        public ComputeBuffer SHRestBuffer2 => shRestBuffer2;
         public ComputeBuffer RemapBuffer => remapGPU;
 
         /// <summary>
@@ -199,9 +195,7 @@ namespace GaussianSplatting
         // ------------------------------------------------------------------
         //  Construction and disposal
 
-        /// <summary>
-        /// Creates a new chunk streamer with a fixed GPU pool and async I/O thread.
-        /// </summary>
+        /// <summary> Creates a new chunk streamer with a fixed GPU pool and async I/O thread. </summary>
         /// <param name="asset">Chunked asset to stream from.</param>
         /// <param name="maxVisibleSplats">Upper bound on visible splats. Capped to
         /// the asset's total splat count so small scenes do not over allocate.</param>
@@ -220,28 +214,31 @@ namespace GaussianSplatting
             this.asset = asset;
             this.chunkSize = asset.chunkSize;
             this.shRestStride = asset.SHRestStride;
+            this.shBands = asset.SHBands;
 
             // Cap allocation to what the scene actually needs
             int effectiveMax = Mathf.Min(maxVisibleSplats, asset.totalSplatCount);
             this.maxSlots = Mathf.Max(1, Mathf.CeilToInt((float)effectiveMax / chunkSize));
-            int uncappedCapacity = maxSlots * chunkSize;
 
-            // Each staging array is byte[poolCapacity * stride], but arrays are limited to int.MaxValue elements 
-            // (~2 GB for byte[]), so we must cap poolCapacity to keep the largest staging array within that limit.
+            // Cap pool so the largest individual ComputeBuffer stays under 2 GB (the DX12 structured-buffer limit). With multi-bank SH rest the
+            // bottleneck is the largest per-band stride (84 B for SH3 band 3).
+            const long MaxBufferBytes = 2_000_000_000L;
             int largestStride = Mathf.Max(
                 Mathf.Max(ChunkedGSAsset.PositionStride, ChunkedGSAsset.RotationStride),
-                Mathf.Max(ChunkedGSAsset.ScaleStride,
-                    Mathf.Max(ChunkedGSAsset.SHStride, shRestStride)));
-            int maxPoolForStaging = int.MaxValue / largestStride;
-            // Round down to whole slots so poolCapacity stays a multiple of chunkSize
-            int maxSlotsForStaging = maxPoolForStaging / chunkSize;
-            if (maxSlots > maxSlotsForStaging)
+                Mathf.Max(ChunkedGSAsset.ScaleStride, ChunkedGSAsset.SHStride));
+            if (shBands >= 1) largestStride = Mathf.Max(largestStride, ChunkedGSAsset.SHBand1Stride);
+            if (shBands >= 2) largestStride = Mathf.Max(largestStride, ChunkedGSAsset.SHBand2Stride);
+            if (shBands >= 3) largestStride = Mathf.Max(largestStride, ChunkedGSAsset.SHBand3Stride);
+            int maxSlotsForPool = (int)(MaxBufferBytes / largestStride / chunkSize);
+            if (this.maxSlots > maxSlotsForPool)
             {
+                long capSplats = (long)maxSlotsForPool * chunkSize;
                 Debug.LogWarning(
-                    $"GSChunkStreamer: capping pool from {maxSlots} to {maxSlotsForStaging} slots " +
-                    $"({maxSlotsForStaging * chunkSize} splats) to keep staging arrays under 2 GB. " +
+                    $"GSChunkStreamer: capping pool from {this.maxSlots} to {maxSlotsForPool} slots " +
+                    $"({capSplats} splats) to keep GPU buffers under 2 GB. " +
+                    $"Largest stride: {largestStride} B/splat (SH bands: {shBands}). " +
                     $"Scene has {asset.totalSplatCount} splats total; streaming will page the rest.");
-                this.maxSlots = maxSlotsForStaging;
+                this.maxSlots = maxSlotsForPool;
             }
             this.poolCapacity = this.maxSlots * chunkSize;
 
@@ -268,16 +265,24 @@ namespace GaussianSplatting
             // number of active splats when all slots are occupied
             remapCPU = new uint[poolCapacity];
 
-            // CPU staging arrays: full-pool mirrors for batched GPU uploads.
-            // Pre-allocated once to avoid per-frame allocation and GC pressure.
-            // Sizes are guaranteed to fit in int by the cap above.
-            stagingPositions = new byte[poolCapacity * ChunkedGSAsset.PositionStride];
-            stagingRotations = new byte[poolCapacity * ChunkedGSAsset.RotationStride];
-            stagingScales    = new byte[poolCapacity * ChunkedGSAsset.ScaleStride];
-            stagingSH        = new byte[poolCapacity * ChunkedGSAsset.SHStride];
-            stagingSHRest    = shRestStride > 0
-                ? new byte[poolCapacity * shRestStride]
-                : null;
+            // Compute per-chunk byte budget for upload throttling
+            bytesPerChunk = chunkSize * (ChunkedGSAsset.PositionStride + ChunkedGSAsset.RotationStride +
+                                         ChunkedGSAsset.ScaleStride + ChunkedGSAsset.SHStride);
+            if (shBands >= 1) bytesPerChunk += chunkSize * ChunkedGSAsset.SHBand1Stride;
+            if (shBands >= 2) bytesPerChunk += chunkSize * ChunkedGSAsset.SHBand2Stride;
+            if (shBands >= 3) bytesPerChunk += chunkSize * ChunkedGSAsset.SHBand3Stride;
+            maxPatchesPerFrame = Mathf.Max(1, MaxUploadBytesPerFrame / bytesPerChunk);
+
+            // Patch CPU staging (compact: sized to maxPatchesPerFrame, not poolCapacity)
+            int patchSplats = maxPatchesPerFrame * chunkSize;
+            patchHeadersCPU  = new uint[maxPatchesPerFrame * 2];
+            patchPosCPU      = new byte[patchSplats * ChunkedGSAsset.PositionStride];
+            patchRotCPU      = new byte[patchSplats * ChunkedGSAsset.RotationStride];
+            patchScaleCPU    = new byte[patchSplats * ChunkedGSAsset.ScaleStride];
+            patchSHCPU       = new byte[patchSplats * ChunkedGSAsset.SHStride];
+            patchSHBand1CPU  = shBands >= 1 ? new byte[patchSplats * ChunkedGSAsset.SHBand1Stride] : null;
+            patchSHBand2CPU  = shBands >= 2 ? new byte[patchSplats * ChunkedGSAsset.SHBand2Stride] : null;
+            patchSHBand3CPU  = shBands >= 3 ? new byte[patchSplats * ChunkedGSAsset.SHBand3Stride] : null;
 
             // Frustum planes
             basePlanes = new Plane[6];
@@ -309,6 +314,7 @@ namespace GaussianSplatting
             ioWakeEvent = new ManualResetEventSlim(false);
 
             AllocateGPUBuffers();
+            AllocateScatterBuffers();
             StartIOThread();
         }
 
@@ -319,23 +325,14 @@ namespace GaussianSplatting
             scaleBuffer = new ComputeBuffer(poolCapacity, ChunkedGSAsset.ScaleStride);
             shBuffer = new ComputeBuffer(poolCapacity, ChunkedGSAsset.SHStride);
 
-            if (asset.SHRestCount > 0)
-                shRestBuffer = new ComputeBuffer(poolCapacity, shRestStride);
+            // Use float stride (4) so StructuredBuffer<float> and RWStructuredBuffer<float> bindings are correct without stride mismatch 
+            // in both precompute and scatter shaders.
+            shRestBuffer0 = new ComputeBuffer(shBands >= 1 ? poolCapacity * ChunkedGSAsset.SHBand1Count : 1, sizeof(float));
+            shRestBuffer1 = new ComputeBuffer(shBands >= 2 ? poolCapacity * ChunkedGSAsset.SHBand2Count : 1, sizeof(float));
+            shRestBuffer2 = new ComputeBuffer(shBands >= 3 ? poolCapacity * ChunkedGSAsset.SHBand3Count : 1, sizeof(float));
 
             // Remap buffer (one uint per potential active splat)
             remapGPU = new ComputeBuffer(Mathf.Max(1, poolCapacity), sizeof(uint));
-        }
-
-        private void StartIOThread()
-        {
-            ioThreadRunning = true;
-            ioThread = new Thread(IOThreadMain)
-            {
-                Name = "GSChunkIO",
-                IsBackground = true,
-                Priority = System.Threading.ThreadPriority.BelowNormal
-            };
-            ioThread.Start();
         }
 
         public void Dispose()
@@ -375,135 +372,26 @@ namespace GaussianSplatting
             rotationBuffer?.Release();
             scaleBuffer?.Release();
             shBuffer?.Release();
-            shRestBuffer?.Release();
+            shRestBuffer0?.Release();
+            shRestBuffer1?.Release();
+            shRestBuffer2?.Release();
             remapGPU?.Release();
 
             positionBuffer = null;
             rotationBuffer = null;
             scaleBuffer = null;
             shBuffer = null;
-            shRestBuffer = null;
+            shRestBuffer0 = null;
+            shRestBuffer1 = null;
+            shRestBuffer2 = null;
             remapGPU = null;
+
+            DisposePatchBuffers();
 
             readyChunkSet.Clear();
             pendingChunkSet.Clear();
             activeChunkOrder.Clear();
             currentActiveSplatCount = 0;
-        }
-
-
-        // ------------------------------------------------------------------
-        //  Background I/O thread
-
-        /// <summary>
-        /// Entry point for the background I/O thread. Opens its own set of file
-        /// handles (independent of the main thread) and reads chunks on demand.
-        /// Results are placed in the completion queue for the main thread.
-        /// </summary>
-        private void IOThreadMain()
-        {
-            FileStream posFs = OpenFileHandle(posFilePath);
-            FileStream rotFs = OpenFileHandle(rotFilePath);
-            FileStream scaleFs = OpenFileHandle(scaleFilePath);
-            FileStream shFs = OpenFileHandle(shFilePath);
-            FileStream shRestFs = !string.IsNullOrEmpty(shRestFilePath)
-                ? OpenFileHandle(shRestFilePath)
-                : null;
-
-            try
-            {
-                while (ioThreadRunning)
-                {
-                    // Drain all queued requests
-                    while (requestQueue.TryDequeue(out ReadRequest req))
-                    {
-                        if (!ioThreadRunning) return;
-                        ReadResult result = ExecuteChunkRead(req, posFs, rotFs, scaleFs, shFs, shRestFs);
-                        completionQueue.Enqueue(result);
-                    }
-
-                    // Sleep until new work arrives or shutdown is signaled.
-                    // The 50ms timeout prevents the thread from sleeping forever
-                    // if the wake event fires before Wait is called.
-                    ioWakeEvent.Wait(50);
-                    ioWakeEvent.Reset();
-                }
-            }
-            finally
-            {
-                posFs?.Dispose();
-                rotFs?.Dispose();
-                scaleFs?.Dispose();
-                shFs?.Dispose();
-                shRestFs?.Dispose();
-            }
-        }
-
-        private static FileStream OpenFileHandle(string path)
-        {
-            if (string.IsNullOrEmpty(path) || !File.Exists(path)) return null;
-            return new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 65536);
-        }
-
-        private ReadResult ExecuteChunkRead(
-            ReadRequest req,
-            FileStream posFs, FileStream rotFs,
-            FileStream scaleFs, FileStream shFs, FileStream shRestFs)
-        {
-            ChunkInfo meta = asset.Chunks[req.chunkIndex];
-            int count = meta.splatCount;
-            int start = meta.startIndex;
-
-            ReadResult r;
-            r.chunkIndex = req.chunkIndex;
-            r.slotIndex = req.slotIndex;
-            r.positions = ReadRegion(posFs, start, count, ChunkedGSAsset.PositionStride);
-            r.rotations = ReadRegion(rotFs, start, count, ChunkedGSAsset.RotationStride);
-            r.scales = ReadRegion(scaleFs, start, count, ChunkedGSAsset.ScaleStride);
-            r.sh = ReadRegion(shFs, start, count, ChunkedGSAsset.SHStride);
-            r.shRest = (shRestFs != null && shRestStride > 0)
-                ? ReadRegion(shRestFs, start, count, shRestStride)
-                : null;
-
-            bool coreOk =
-                r.positions != null &&
-                r.rotations != null &&
-                r.scales != null &&
-                r.sh != null;
-
-            bool shRestOk = shRestStride <= 0 || r.shRest != null;
-
-            r.ok = coreOk && shRestOk;
-            r.error = r.ok ? null : "missing or truncated chunk payload";
-            return r;
-        }
-
-        /// <summary>
-        /// Reads a contiguous region of a data file into a new byte array.
-        /// Handles partial OS reads with a loop.
-        /// </summary>
-        private static byte[] ReadRegion(FileStream fs, int startSplat, int splatCount, int stride)
-        {
-            if (fs == null) return null;
-
-            long byteOffset = startSplat * (long)stride;
-            int byteCount = splatCount * stride;
-            byte[] data = new byte[byteCount];
-
-            fs.Seek(byteOffset, SeekOrigin.Begin);
-            int totalRead = 0;
-            while (totalRead < byteCount)
-            {
-                int read = fs.Read(data, totalRead, byteCount - totalRead);
-                if (read <= 0) break;
-                totalRead += read;
-            }
-
-            // Important: don't return partial payloads
-            if (totalRead != byteCount)
-                return null;
-
-            return data;
         }
 
 
@@ -518,12 +406,21 @@ namespace GaussianSplatting
         {
             int frame = Time.frameCount;
             int camId = camera.GetInstanceID();
-            if (frame == lastProcessedFrame && camId == lastCameraID) return;
-            lastProcessedFrame = frame;
-            lastCameraID = camId;
 
-            // Step 1: drain completed async reads into CPU staging (no GPU calls)
-            ProcessCompletedReads();
+            // Drain the completion queue exactly once per frame, regardless of how many cameras call this.
+            // The first camera to call this frame does the drain; subsequent cameras skip it.
+            // This prevents ProcessCompletedReads from resetting pendingPatchCount on a second camera call.
+            if (frame != lastCompletionDrainFrame)
+            {
+                ProcessCompletedReads();
+                lastCompletionDrainFrame = frame;
+                camerasProcessedThisFrame.Clear();
+            }
+
+            // Skip frustum/eviction/load if this exact camera already ran this frame.
+            // HashSet.Add returns false if the element was already present.
+            if (!camerasProcessedThisFrame.Add(camId))
+                return;
 
             // Step 2: frustum cull chunk AABBs (octree-accelerated)
             GeometryUtility.CalculateFrustumPlanes(camera, basePlanes);
@@ -606,17 +503,20 @@ namespace GaussianSplatting
             }
 
             // Step 4: determine new chunks to load
+            // Cap new requests so the I/O thread + completion queue don't grow unbounded.
             toLoadList.Clear();
             int available = freeSlots.Count;
+            int pendingBudget = MaxPendingRequests - pendingChunkSet.Count;
 
             for (int i = 0; i < innerVisibleList.Count; i++)
             {
                 int idx = innerVisibleList[i];
                 if (chunks[idx].state != SlotState.Unloaded) continue;
-                if (available <= 0) break;
+                if (available <= 0 || pendingBudget <= 0) break;
 
                 toLoadList.Add(idx);
                 available--;
+                pendingBudget--;
             }
 
             // Dispatch async read requests
@@ -635,99 +535,6 @@ namespace GaussianSplatting
 
             // Update pending count for diagnostics
             PendingReadCount = requestQueue.Count;
-
-            // Step 5: flush all changes to GPU
-            FlushToGPU();
-        }
-
-
-        // ------------------------------------------------------------------
-        //  Completion processing and GPU upload
-
-        /// <summary>
-        /// Drains ALL completed async reads in one pass. Chunk data is copied into the pre-allocated CPU 
-        /// staging arrays (pure memcpy, no GPU calls). Stale results for chunks evicted before their read 
-        /// finished are discarded.
-        /// </summary>
-        private void ProcessCompletedReads()
-        {
-            while (completionQueue.TryDequeue(out ReadResult result))
-            {
-                if (result.chunkIndex < 0 || result.chunkIndex >= chunks.Length)
-                    continue;
-
-                ChunkRuntime c = chunks[result.chunkIndex];
-                if (c.state != SlotState.Pending || c.slotIndex != result.slotIndex)
-                    continue;
-
-                if (!result.ok)
-                {
-                    int slot = c.slotIndex;
-                    c.state = SlotState.Unloaded;
-                    c.slotIndex = -1;
-                    pendingChunkSet.Remove(result.chunkIndex);
-                    if (slot >= 0)
-                        freeSlots.Push(slot);
-                    Debug.LogError($"GSChunkStreamer: failed to load chunk {result.chunkIndex}: {result.error}");
-                    continue;
-                }
-
-                // Copy into pre-allocated staging arrays (CPU memcpy, zero GPU cost)
-                CopyToStaging(result);
-
-                c.state = SlotState.Ready;
-                pendingChunkSet.Remove(result.chunkIndex);
-                readyChunkSet.Add(result.chunkIndex);
-                activeChunkOrder.Add(result.chunkIndex);
-
-                // Append remap entries for this chunk at the tail
-                int slotOffset = c.slotIndex * chunkSize;
-                int splatCount = c.metadata.splatCount;
-                int appendCount = Mathf.Min(splatCount, poolCapacity - currentActiveSplatCount);
-                c.remapStartIdx = currentActiveSplatCount;
-                for (int s = 0; s < appendCount; s++)
-                    remapCPU[currentActiveSplatCount + s] = (uint)(slotOffset + s);
-
-                // Track dirty remap range (append region)
-                if (dirtyRemapMin > currentActiveSplatCount)
-                    dirtyRemapMin = currentActiveSplatCount;
-                currentActiveSplatCount += appendCount;
-                dirtyRemapMax = currentActiveSplatCount - 1;
-
-                bufferContentsDirty = true;
-                statLoadCount++;
-            }
-        }
-
-        /// <summary>
-        /// Copies one chunk's payload from the async read result into the pre-allocated CPU staging arrays 
-        /// at the correct slot offset. Pure CPU memcpy via Buffer.BlockCopy. Also expands the per-frame dirty slot
-        /// range so FlushToGPU uploads the bounding region in one SetData per attribute.
-        /// </summary>
-        private void CopyToStaging(ReadResult result)
-        {
-            int slot = result.slotIndex;
-            int splatCount = chunks[result.chunkIndex].metadata.splatCount;
-            int splatBase = slot * chunkSize;
-
-            CopyRegion(result.positions, stagingPositions, splatBase, splatCount, ChunkedGSAsset.PositionStride);
-            CopyRegion(result.rotations, stagingRotations, splatBase, splatCount, ChunkedGSAsset.RotationStride);
-            CopyRegion(result.scales,    stagingScales,    splatBase, splatCount, ChunkedGSAsset.ScaleStride);
-            CopyRegion(result.sh,        stagingSH,        splatBase, splatCount, ChunkedGSAsset.SHStride);
-            CopyRegion(result.shRest,    stagingSHRest,    splatBase, splatCount, shRestStride);
-
-            // Track dirty slot for this chunk
-            dirtySlots.Add(slot);
-        }
-
-        /// <summary>
-        /// Copies splatCount * stride bytes from src into dst at the given splat offset.
-        /// Null-safe: skips if either array is null (e.g. SH rest when band count is 0).
-        /// </summary>
-        private static void CopyRegion(byte[] src, byte[] dst, int dstSplatStart, int splatCount, int stride)
-        {
-            if (src == null || dst == null || stride <= 0) return;
-            Buffer.BlockCopy(src, 0, dst, dstSplatStart * stride, splatCount * stride);
         }
 
 
@@ -760,9 +567,9 @@ namespace GaussianSplatting
         //  Remap buffer
 
         /// <summary>
-        /// CPU-only remap compaction: rebuilds remapCPU from the authoritative set of
-        /// Ready chunks. No GPU upload — that is deferred to FlushToGPU. Also updates
-        /// each chunk's remapStartIdx so future incremental appends are consistent.
+        /// Rebuilds the remap buffer on the CPU by iterating active chunks in logical order and writing their slot positions.
+        /// Updates each chunk's remapStartIdx for its position in the remap buffer. This is a pure CPU operation that runs after evictions and before uploads, 
+        /// so the remap GPU buffer is only updated once per frame with a single SetBufferData call for the dirty range.
         /// </summary>
         private void CompactRemapCPU()
         {
@@ -795,88 +602,6 @@ namespace GaussianSplatting
             }
 
             currentActiveSplatCount = logicalIdx;
-        }
-
-
-        // ------------------------------------------------------------------
-        //  GPU flush
-
-        /// <summary>
-        /// Uploads all per-frame dirty data to the GPU.
-        /// For each contiguous run of dirty slots this issues one SetData call per attribute buffer (position, rotation, 
-        /// scale, SH, and SHRest if present). After all runs are flushed the remap buffer is uploaded for the dirty index range.
-        /// Total SetData calls = (#runs * attributeCount) + 1 (remap).
-        /// </summary>
-        private void FlushToGPU()
-        {
-            // Attribute buffers: per-run SetData for contiguous groups of dirty slots
-            if (dirtySlots.Count > 0)
-            {
-                // Sort so we can merge adjacent slots into single SetData calls
-                dirtySlotsTemp.Clear();
-                dirtySlotsTemp.AddRange(dirtySlots);
-                dirtySlotsTemp.Sort();
-
-                // Walk sorted slots, merge adjacent ones into contiguous runs
-                int runStart = dirtySlotsTemp[0];
-                int runEnd = runStart; 
-
-                for (int i = 1; i < dirtySlotsTemp.Count; i++)
-                {
-                    int slot = dirtySlotsTemp[i];
-                    if (slot == runEnd + 1)
-                    {
-                        runEnd = slot; // extend current run
-                    }
-                    else
-                    {
-                        // Flush the completed run
-                        FlushSlotRun(runStart, runEnd);
-                        runStart = slot;
-                        runEnd = slot;
-                    }
-                }
-                FlushSlotRun(runStart, runEnd); // flush final run
-
-                dirtySlots.Clear();
-            }
-
-            // Remap buffer
-            if (dirtyRemapMin <= dirtyRemapMax)
-            {
-                int count = dirtyRemapMax - dirtyRemapMin + 1;
-                remapGPU.SetData(remapCPU, dirtyRemapMin, dirtyRemapMin, count);
-                dirtyRemapMin = int.MaxValue;
-                dirtyRemapMax = -1;
-            }
-        }
-
-        private void FlushSlotRun(int startSlot, int endSlot)
-        {
-            int startSplat = startSlot * chunkSize;
-            int endSplat = Mathf.Min((endSlot + 1) * chunkSize, poolCapacity);
-
-            FlushAttribute(positionBuffer, stagingPositions, ChunkedGSAsset.PositionStride, startSplat, endSplat);
-            FlushAttribute(rotationBuffer, stagingRotations, ChunkedGSAsset.RotationStride, startSplat, endSplat);
-            FlushAttribute(scaleBuffer, stagingScales, ChunkedGSAsset.ScaleStride, startSplat, endSplat);
-            FlushAttribute(shBuffer, stagingSH, ChunkedGSAsset.SHStride, startSplat, endSplat);
-
-            if (shRestBuffer != null && stagingSHRest != null)
-                FlushAttribute(shRestBuffer, stagingSHRest, shRestStride, startSplat, endSplat);
-        }
-
-        /// <summary>
-        /// Uploads one attribute's bounding dirty range from the CPU staging array
-        /// to the corresponding GPU ComputeBuffer. Single SetData call.
-        /// </summary>
-        private static void FlushAttribute(
-            ComputeBuffer gpuBuffer, byte[] staging, int stride,
-            int startSplat, int endSplat)
-        {
-            int startByte = startSplat * stride;
-            int byteCount = (endSplat - startSplat) * stride;
-            if (byteCount <= 0) return;
-            gpuBuffer.SetData(staging, startByte, startByte, byteCount);
         }
 
 

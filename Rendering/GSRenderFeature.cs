@@ -41,7 +41,7 @@ namespace GaussianSplatting
                 if (settings.sortingShader == null)
                 {
                     // Try to find it by path
-                    settings.sortingShader = (ComputeShader)UnityEngine.Resources.Load("GaussianSplatting/Rendering/GSSorting");
+                    settings.sortingShader = (ComputeShader)UnityEngine.Resources.Load("GaussianSplatting/Rendering/Shaders/GSSorting");
                 }
             }
 
@@ -51,7 +51,7 @@ namespace GaussianSplatting
                 settings.precomputeShader = Resources.Load<ComputeShader>("GSPrecompute");
                 if (settings.precomputeShader == null)
                 {
-                    settings.precomputeShader = (ComputeShader)UnityEngine.Resources.Load("GaussianSplatting/Rendering/GSPrecompute");
+                    settings.precomputeShader = (ComputeShader)UnityEngine.Resources.Load("GaussianSplatting/Rendering/Shaders/GSPrecompute");
                 }
             }
 
@@ -362,7 +362,6 @@ namespace GaussianSplatting
                     context.cmd.SetComputeFloatParam(pc, "_SplatScale", effectiveSplatScale);
                     context.cmd.SetComputeVectorParam(pc, "_CameraWorldPos", data.cameraWorldPos);
                     context.cmd.SetComputeIntParam(pc, "_SHBands", component.ShBandsNumber);
-                    context.cmd.SetComputeIntParam(pc, "_SHRestCount", component.gsAsset != null ? component.gsAsset.SHRestCount : 0);
                     int csMode = (data.colorSpaceModes != null && i < data.colorSpaceModes.Length) ? data.colorSpaceModes[i] : 0;
                     context.cmd.SetComputeIntParam(pc, "_ColorSpaceMode", csMode);
                     bool debugPts = data.debugPoints != null && i < data.debugPoints.Length && data.debugPoints[i];
@@ -377,8 +376,12 @@ namespace GaussianSplatting
                     component.BindToCompute(context.cmd, pc, kernelCalcSplatViewData);
                     if (component.SHBuffer != null)
                         context.cmd.SetComputeBufferParam(pc, kernelCalcSplatViewData, "_SH", component.SHBuffer);
-                    if (component.SHRestBuffer != null)
-                        context.cmd.SetComputeBufferParam(pc, kernelCalcSplatViewData, "_SHRest", component.SHRestBuffer);
+                    if (component.SHRestBuffer0 != null)
+                        context.cmd.SetComputeBufferParam(pc, kernelCalcSplatViewData, "_SHRest0", component.SHRestBuffer0);
+                    if (component.SHRestBuffer1 != null)
+                        context.cmd.SetComputeBufferParam(pc, kernelCalcSplatViewData, "_SHRest1", component.SHRestBuffer1);
+                    if (component.SHRestBuffer2 != null)
+                        context.cmd.SetComputeBufferParam(pc, kernelCalcSplatViewData, "_SHRest2", component.SHRestBuffer2);
 
                     resources.BindSplatViewDataOutput(context.cmd, pc, kernelCalcSplatViewData);
                     DispatchLinear(pc, kernelCalcSplatViewData, groups);                    

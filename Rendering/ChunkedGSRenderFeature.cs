@@ -25,6 +25,10 @@ namespace GaussianSplatting
         // Track the material we create so we can clean it up on dispose
         private Material ownedMaterial;
 
+        /// <summary>
+        /// Creates render pass given current settings, finds/assigns default shaders if not set, and registers the pass to the renderer. 
+        /// The pass will be enqueued for execution in AddRenderPasses.
+        /// </summary>
         public override void Create()
         {
             if (settings == null)
@@ -48,7 +52,7 @@ namespace GaussianSplatting
                 settings.sortingShader = Resources.Load<ComputeShader>("GSSorting");
                 if (settings.sortingShader == null)
                 {
-                    settings.sortingShader = (ComputeShader)UnityEngine.Resources.Load("GaussianSplatting/Rendering/GSSorting");
+                    settings.sortingShader = (ComputeShader)UnityEngine.Resources.Load("GaussianSplatting/Rendering/Shaders/GSSorting");
                 }
             }
 
@@ -57,7 +61,7 @@ namespace GaussianSplatting
                 settings.precomputeShader = Resources.Load<ComputeShader>("GSPrecompute");
                 if (settings.precomputeShader == null)
                 {
-                    settings.precomputeShader = (ComputeShader)UnityEngine.Resources.Load("GaussianSplatting/Rendering/GSPrecompute");
+                    settings.precomputeShader = (ComputeShader)UnityEngine.Resources.Load("GaussianSplatting/Rendering/Shaders/GSPrecompute");
                 }
             }
 
@@ -65,6 +69,7 @@ namespace GaussianSplatting
             renderPass.renderPassEvent = settings.renderPassEvent;
         }
 
+        /// <summary> Enqueues the render pass to the renderer for execution. </summary>
         public override void AddRenderPasses(ScriptableRenderer renderer, ref RenderingData renderingData)
         {
             if (settings == null || !settings.enabled || settings.splatMaterial == null)
@@ -77,8 +82,7 @@ namespace GaussianSplatting
 
         protected override void Dispose(bool disposing)
         {
-            // Clean up the Material we created with HideAndDontSave to prevent
-            // persistent allocation leaks across domain reloads.
+            // Clean up the Material we created with HideAndDontSave to prevent persistent allocation leaks across domain reloads.
             if (ownedMaterial != null)
             {
                 if (Application.isPlaying)
@@ -89,6 +93,7 @@ namespace GaussianSplatting
             }
         }
 
+        /// <summary> Settings for the chunked Gaussian splatting render feature. </summary>
         [Serializable]
         public class ChunkedGSRenderSettings
         {
@@ -118,14 +123,21 @@ namespace GaussianSplatting
                 this.settings = settings;
             }
 
-            // Incremental sort state (static because ExecuteSortPass is a static render func)
-            private static Vector3 lastFullSortCameraPosition;
-            private static Quaternion lastFullSortCameraRotation;
-            private static int framesSinceFullSort = 0;
+            // Per-component sort history. Sorting resources are owned per component,
+            // so camera-switch detection and full-sort cadence must also be tracked
+            // per component instead of globally.
+            private struct SortHistory
+            {
+                public bool hasFullSort;
+                public int lastSortedCameraId;
+                public Vector3 lastFullSortCameraPosition;
+                public Quaternion lastFullSortCameraRotation;
+                public int framesSinceFullSort;
+            }
 
             // Thresholds for choosing full vs incremental sort
-            private const float FullSortPositionThreshold = 5.0f;    // meters
-            private const float FullSortRotationThreshold = 0.05f;   // ~6 degrees
+            private const float FullSortPositionThreshold = 5.0f;           // meters
+            private const float FullSortRotationThresholdDegrees = 6.0f;    // degrees
             private const int MaxFramesBetweenFullSorts = 120;        // Force full sort every N frames
             private const int OddEvenRepairPasses = 3;                // Number of even+odd pass pairs
 
@@ -137,9 +149,10 @@ namespace GaussianSplatting
             }
 
             private readonly Dictionary<int, CameraPose> cameraPoseById = new();
+            private readonly Dictionary<int, SortHistory> sortHistoryByComponentId = new();
             private const float CameraPositionThreshold = 0.001f;
             private const float CameraPositionThresholdSqr = CameraPositionThreshold * CameraPositionThreshold;
-            private const float CameraRotationThreshold = 0.001f;
+            private const float CameraRotationThresholdDegrees = 0.05f;
 
             private bool IsSortDrivingCamera(Camera camera)
             {
@@ -179,8 +192,8 @@ namespace GaussianSplatting
                     return true;
                 }
 
-                float rotDelta = 1.0f - Mathf.Abs(Quaternion.Dot(currentRot, last.rotation));
-                if (rotDelta > CameraRotationThreshold)
+                float rotDeltaDegrees = Quaternion.Angle(currentRot, last.rotation);
+                if (rotDeltaDegrees > CameraRotationThresholdDegrees)
                 {
                     cameraPoseById[id] = new CameraPose { position = currentPos, rotation = currentRot };
                     return true;
@@ -189,25 +202,91 @@ namespace GaussianSplatting
                 return false;
             }
 
-            private static bool NeedsFullSort(Camera camera, bool chunksDirty)
+            private bool WasLastSortedByDifferentCamera(ChunkedGSComponent component, Camera camera)
             {
+                if (component == null || camera == null)
+                    return true;
+
+                int componentId = component.GetInstanceID();
+                if (!sortHistoryByComponentId.TryGetValue(componentId, out SortHistory history))
+                    return true;
+
+                return history.lastSortedCameraId != camera.GetInstanceID();
+            }
+
+            private bool NeedsFullSort(Camera camera, ChunkedGSComponent component, bool chunksDirty)
+            {
+                if (camera == null || component == null)
+                    return true;
+
                 // Always full sort if chunks changed (remap invalidated)
                 if (chunksDirty) return true;
 
-                // First sort ever
-                if (framesSinceFullSort == 0) return true;
+                // Sorting buffers are shared per component. If another camera was the
+                // last one to sort them, the current order is for the wrong viewpoint.
+                if (WasLastSortedByDifferentCamera(component, camera))
+                    return true;
+
+                int componentId = component.GetInstanceID();
+                if (!sortHistoryByComponentId.TryGetValue(componentId, out SortHistory history) || !history.hasFullSort)
+                    return true;
 
                 // Periodic full sort to prevent drift
-                if (framesSinceFullSort >= MaxFramesBetweenFullSorts) return true;
+                if (history.framesSinceFullSort >= MaxFramesBetweenFullSorts) return true;
 
                 // Large camera movement
-                float posDelta = Vector3.Distance(camera.transform.position, lastFullSortCameraPosition);
+                float posDelta = Vector3.Distance(camera.transform.position, history.lastFullSortCameraPosition);
                 if (posDelta > FullSortPositionThreshold) return true;
 
-                float rotDot = Quaternion.Dot(camera.transform.rotation, lastFullSortCameraRotation);
-                if (1.0f - Mathf.Abs(rotDot) > FullSortRotationThreshold) return true;
+                float rotDeltaDegrees = Quaternion.Angle(camera.transform.rotation, history.lastFullSortCameraRotation);
+                if (rotDeltaDegrees > FullSortRotationThresholdDegrees) return true;
 
                 return false;
+            }
+
+            private void RecordFullSort(Camera camera, ChunkedGSComponent component)
+            {
+                if (camera == null || component == null)
+                    return;
+
+                sortHistoryByComponentId[component.GetInstanceID()] = new SortHistory
+                {
+                    hasFullSort = true,
+                    lastSortedCameraId = camera.GetInstanceID(),
+                    lastFullSortCameraPosition = camera.transform.position,
+                    lastFullSortCameraRotation = camera.transform.rotation,
+                    framesSinceFullSort = 1
+                };
+            }
+
+            private void RecordIncrementalSort(Camera camera, ChunkedGSComponent component)
+            {
+                if (camera == null || component == null)
+                    return;
+
+                int componentId = component.GetInstanceID();
+                SortHistory history = sortHistoryByComponentId.TryGetValue(componentId, out SortHistory existing)
+                    ? existing
+                    : default;
+
+                history.lastSortedCameraId = camera.GetInstanceID();
+                history.framesSinceFullSort = Mathf.Max(1, history.framesSinceFullSort + 1);
+                sortHistoryByComponentId[componentId] = history;
+            }
+
+            /// <summary>
+            /// Returns true for any camera that should drive chunk loading and frustum culling. This is intentionally broader than 
+            /// IsSortDrivingCamera: both scene and game cameras should load their own chunks, but only one drives the sort order.
+            /// </summary>
+            private static bool IsCullingCamera(Camera camera)
+            {
+                if (camera == null) return false;
+#if UNITY_EDITOR
+                return camera.cameraType != CameraType.Preview &&
+                        camera.cameraType != CameraType.Reflection;
+#else
+                return true;
+#endif
             }
 
             private class PassData
@@ -283,7 +362,7 @@ namespace GaussianSplatting
                 kernelCalcSplatViewData = shader.FindKernel("CalcSplatViewData");
             }
 
-            private static void ExecuteSortPass(SortPassData data, ComputeGraphContext context)
+            private void ExecuteSortPass(SortPassData data, ComputeGraphContext context)
             {
                 if (data.sortingShader == null || data.components == null || data.components.Length == 0 || data.precomputeShader == null)
                 {
@@ -303,7 +382,7 @@ namespace GaussianSplatting
                     context.cmd.DispatchCompute(shader, kernel, groupsX, groupsY, 1);
                 }
 
-                for (int i = 0; i < data.components.Length; i++)
+                for (int i = 0; i < data.components.Length; i++)            // For each Gaussian Splat component (in case of multiple assets to load in a scene)
                 {
                     ChunkedGSComponent component = data.components[i];
                     if (component == null || !component.HasBuffers)
@@ -311,25 +390,20 @@ namespace GaussianSplatting
                         continue;
                     }
 
-                    // In play mode the game camera drives chunk loading; in edit mode the scene camera does. 
-                    // The other view still renders whatever chunks are already loaded but does not trigger I/O.
-                    bool driveVisibility = true;
-#if UNITY_EDITOR
-                    if (Application.isPlaying)
-                        driveVisibility = data.camera.cameraType != CameraType.SceneView;
-                    else
-                        driveVisibility = data.camera.cameraType == CameraType.SceneView;
-#endif
-                    if (driveVisibility)
+                    // All non-preview cameras drive chunk loading. This ensures the scene view
+                    // always loads its own chunks in play mode, not just whatever the game camera loaded.
+                    bool driveCulling = IsCullingCamera(data.camera);
+                    if (driveCulling)
                     {
                         component.UpdateVisibilityForCamera(data.camera);
+                        // FlushScatterCommandBuffer dispatches pending scatter uploads into this command buffer.
+                        // Only the first call per frame does real work; subsequent cameras (same frame) are no-ops
+                        // because ProcessCompletedReads already ran and FlushScatter resets pendingPatchCount.
+                        component.FlushScatterCommandBuffer(context.cmd);
                     }
 
-                    // Skip if no visible splats after visibility update
                     if (component.ActiveSplatCount <= 0)
-                    {
                         continue;
-                    }
 
                     component.InitializeSortingResources();
                     var resources = component.SortingResources;
@@ -337,6 +411,20 @@ namespace GaussianSplatting
                     {
                         continue;
                     }
+
+                    int splatCount = component.ActiveSplatCount;
+                    int groups = Mathf.CeilToInt((float)splatCount / SortGroupSize);
+
+
+
+                    // Sort is driven by a separate, stricter rule: game cameras in play mode, scene camera in edit mode. 
+                    // Other cameras still render whatever sorted order was last written by the driving camera.
+                    bool driveSort = IsSortDrivingCamera(data.camera);
+                    // Non-sort-driving cameras still need the precompute pass to project splat
+                    // view data correctly for their own view matrix. Skip only the sort itself.
+
+                    if (!driveSort)
+                        goto precompute;
 
                     // Sort is needed when the camera moved OR when chunk data changed
                     bool dirtyAtBuild =
@@ -347,10 +435,9 @@ namespace GaussianSplatting
                     // Catches load/evict that happened inside UpdateVisibilityForCamera this frame
                     bool dirtyAfterVisibility = component.ConsumeBufferDirtyFlag();
 
-                    bool componentNeedsSort = data.cameraMoved || dirtyAtBuild || dirtyAfterVisibility;
+                    bool cameraSwitch = WasLastSortedByDifferentCamera(component, data.camera);
 
-                    int splatCount = component.ActiveSplatCount;
-                    int groups = Mathf.CeilToInt((float)splatCount / SortGroupSize);
+                    bool componentNeedsSort = cameraSwitch || data.cameraMoved || dirtyAtBuild || dirtyAfterVisibility;
 
                     // Common uniforms
                     context.cmd.SetComputeMatrixParam(data.sortingShader, "_MatrixV", data.viewMatrix);
@@ -380,7 +467,9 @@ namespace GaussianSplatting
                     // Only run sorting passes if camera moved or chunks changed
                     if (componentNeedsSort)
                     {
-                        bool fullSort = NeedsFullSort(data.camera,
+                        bool fullSort = cameraSwitch || NeedsFullSort(
+                            data.camera,
+                            component,
                             dirtyAtBuild || dirtyAfterVisibility);
 
                         if (fullSort)
@@ -417,10 +506,7 @@ namespace GaussianSplatting
                                 context.cmd.DispatchCompute(data.sortingShader, kernelScan, RadixBins, 1, 1);
                                 context.cmd.DispatchCompute(data.sortingShader, kernelDownsweep, resources.ThreadBlocks, 1, 1);
                             }
-                            // Track full sort state
-                            lastFullSortCameraPosition = data.camera.transform.position;
-                            lastFullSortCameraRotation = data.camera.transform.rotation;
-                            framesSinceFullSort = 1;
+                            RecordFullSort(data.camera, component);
                         }
                         else    // Incremental repair sort
                         {
@@ -443,11 +529,11 @@ namespace GaussianSplatting
                                 context.cmd.SetComputeIntParam(data.sortingShader, "_OddEvenPhase", 1);
                                 DispatchLinear(data.sortingShader, kernelOddEvenPass, halfGroups);
                             }
-
-                            framesSinceFullSort++;
+                            RecordIncrementalSort(data.camera, component);
                         }
                     }
 
+                    precompute:
                     // Dispatch CalcSplatViewData on the precompute shader
                     var pc = data.precomputeShader;
 
@@ -469,7 +555,6 @@ namespace GaussianSplatting
                     context.cmd.SetComputeFloatParam(pc, "_SplatScale", effectiveSplatScale);
                     context.cmd.SetComputeVectorParam(pc, "_CameraWorldPos", data.cameraWorldPos);
                     context.cmd.SetComputeIntParam(pc, "_SHBands", component.ShBandsNumber);
-                    context.cmd.SetComputeIntParam(pc, "_SHRestCount", component.asset != null ? component.asset.SHRestCount : 0);
 
                     int csMode = (data.colorSpaceModes != null && i < data.colorSpaceModes.Length) ? data.colorSpaceModes[i] : 0;
                     context.cmd.SetComputeIntParam(pc, "_ColorSpaceMode", csMode);
@@ -486,8 +571,12 @@ namespace GaussianSplatting
                     component.BindToCompute(context.cmd, pc, kernelCalcSplatViewData);
                     if (component.SHBuffer != null)
                         context.cmd.SetComputeBufferParam(pc, kernelCalcSplatViewData, "_SH", component.SHBuffer);
-                    if (component.SHRestBuffer != null)
-                        context.cmd.SetComputeBufferParam(pc, kernelCalcSplatViewData, "_SHRest", component.SHRestBuffer);
+                    if (component.SHRestBuffer0 != null)
+                        context.cmd.SetComputeBufferParam(pc, kernelCalcSplatViewData, "_SHRest0", component.SHRestBuffer0);
+                    if (component.SHRestBuffer1 != null)
+                        context.cmd.SetComputeBufferParam(pc, kernelCalcSplatViewData, "_SHRest1", component.SHRestBuffer1);
+                    if (component.SHRestBuffer2 != null)
+                        context.cmd.SetComputeBufferParam(pc, kernelCalcSplatViewData, "_SHRest2", component.SHRestBuffer2);
 
                     resources.BindSplatViewDataOutput(context.cmd, pc, kernelCalcSplatViewData);
                     DispatchLinear(pc, kernelCalcSplatViewData, groups);

@@ -1,0 +1,76 @@
+// Scatter upload compute shader for GSChunkStreamer.
+// Copies per-attribute splat data from compact patch buffers into the correct pool slots via GPU scatter, 
+// replacing per-slot SetData calls.
+// Three kernels handle all seven attribute types:
+//   ScatterFloat3  — positions (float3), scales (float3)
+//   ScatterFloat4  — rotations (float4), SH DC (float4)
+//   ScatterFloats  — SH bands (variable: 9 / 15 / 21 floats per splat)
+//
+// Each kernel is dispatched once per attribute; buffer bindings are changed between dispatches on the C# side.
+//
+// Thread layout: X = splat index within chunk (0 .. ChunkSize-1);  Y = dirty chunk index (0 .. pendingPatchCount-1)
+//
+// Dispatch: (ceil(ChunkSize / 64), pendingPatchCount, 1)
+
+#pragma kernel ScatterFloat3
+#pragma kernel ScatterFloat4
+#pragma kernel ScatterFloats
+
+struct PatchHeader
+{
+    uint slotIndex;
+    uint splatCount;
+};
+
+uint _ChunkSize;
+StructuredBuffer<PatchHeader> _PatchHeaders;
+
+// -------------------------------------------------------------------------------
+// Typed float3 kernel (positions, scales)
+StructuredBuffer<float3>   _PatchFloat3;
+RWStructuredBuffer<float3> _PoolFloat3;
+
+[numthreads(64, 1, 1)]
+void ScatterFloat3(uint3 id : SV_DispatchThreadID)
+{
+    uint si = id.x, ci = id.y;
+    if (si >= _ChunkSize) return;
+    PatchHeader h = _PatchHeaders[ci];
+    if (si >= h.splatCount) return;
+    _PoolFloat3[h.slotIndex * _ChunkSize + si] = _PatchFloat3[ci * _ChunkSize + si];
+}
+
+// -------------------------------------------------------------------------------
+// Typed float4 kernel (rotations, SH DC)
+StructuredBuffer<float4>   _PatchFloat4;
+RWStructuredBuffer<float4> _PoolFloat4;
+
+[numthreads(64, 1, 1)]
+void ScatterFloat4(uint3 id : SV_DispatchThreadID)
+{
+    uint si = id.x, ci = id.y;
+    if (si >= _ChunkSize) return;
+    PatchHeader h = _PatchHeaders[ci];
+    if (si >= h.splatCount) return;
+    _PoolFloat4[h.slotIndex * _ChunkSize + si] = _PatchFloat4[ci * _ChunkSize + si];
+}
+
+// -------------------------------------------------------------------------------
+// Generic float-N kernel (SH bands)
+// Dispatched once per band with different _FloatsPerSplat and buffer bindings.
+StructuredBuffer<float>   _PatchFloats;
+RWStructuredBuffer<float> _PoolFloats;
+uint _FloatsPerSplat;
+
+[numthreads(64, 1, 1)]
+void ScatterFloats(uint3 id : SV_DispatchThreadID)
+{
+    uint si = id.x, ci = id.y;
+    if (si >= _ChunkSize) return;
+    PatchHeader h = _PatchHeaders[ci];
+    if (si >= h.splatCount) return;
+    uint srcBase = (ci * _ChunkSize + si) * _FloatsPerSplat;
+    uint dstBase = (h.slotIndex * _ChunkSize + si) * _FloatsPerSplat;
+    for (uint f = 0; f < _FloatsPerSplat; f++)
+        _PoolFloats[dstBase + f] = _PatchFloats[srcBase + f];
+}

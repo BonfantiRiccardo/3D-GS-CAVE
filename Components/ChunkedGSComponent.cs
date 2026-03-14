@@ -6,9 +6,7 @@ namespace GaussianSplatting
     /// <summary>
     /// ChunkedGSComponent manages spatially chunked Gaussian Splatting data with frustum based streaming. 
     /// This component only loads chunks that are visible to the camera, enabling rendering of very large scenes.
-    /// 
-    /// It performs frustum culling at chunk level and dynamic loading/unloading based on camera movement. 
-    /// Implements margin delta for preloading chunks slightly outside the frustum
+    /// It implements margin delta for preloading chunks slightly outside the frustum.
     /// </summary>
     [ExecuteAlways]
     public class ChunkedGSComponent : MonoBehaviour
@@ -25,19 +23,19 @@ namespace GaussianSplatting
 
         [Tooltip("Inner frustum margin for deciding when to load chunks (world units). " +
                  "Chunks entering this expanded frustum get loaded.")]
-        [Range(0f, 50f)]
+        [Range(0f, 10f)]
         public float frustumMargin = 3f;
 
         [Tooltip("Outer frustum margin for deciding when to unload chunks (world units). " +
                  "Must be larger than the inner margin to create a hysteresis band " +
                  "that prevents load/unload thrashing.")]
-        [Range(0f, 100f)]
+        [Range(0f, 15f)]
         public float unloadMargin = 5f;
 
         [Tooltip("Number of frames a chunk must be outside the outer frustum before eviction. " +
                  "Higher values reduce costly repacks at the cost of extra GPU memory.")]
-        [Range(0, 300)]
-        public int evictionDelayFrames = 60;
+        [Range(0, 120)]
+        public int evictionDelayFrames = 30;
 
         [Header("Rendering")]
         [Tooltip("Color space conversion mode for splat colors.\n" +
@@ -58,6 +56,7 @@ namespace GaussianSplatting
         [Tooltip("Size of the debug center points in pixels.")]
         public float centerPointSize = 1.0f;
 
+        [Header("Chunk Visualization")]
         [Tooltip("Show chunk bounding boxes as debug gizmos.")]
         public bool showChunkBounds = false;
 
@@ -66,9 +65,6 @@ namespace GaussianSplatting
 
         // Sorting resources for the visible splats
         private GSSortingResources sortingResources;
-
-        // Cached camera for updates
-        private Camera cachedCamera;
 
         // Properties
         public Vector3 modelPosition => transform.position;
@@ -113,8 +109,10 @@ namespace GaussianSplatting
                 long capacity = streamer.PoolCapacity;
                 long perSplat = ChunkedGSAsset.PositionStride + ChunkedGSAsset.RotationStride +
                                 ChunkedGSAsset.ScaleStride + ChunkedGSAsset.SHStride;
-                if (asset.SHRestCount > 0)
-                    perSplat += asset.SHRestStride;
+                int bands = asset.SHBands;
+                if (bands >= 1) perSplat += ChunkedGSAsset.SHBand1Stride;
+                if (bands >= 2) perSplat += ChunkedGSAsset.SHBand2Stride;
+                if (bands >= 3) perSplat += ChunkedGSAsset.SHBand3Stride;
                 // Add remap buffer: one uint per splat
                 perSplat += sizeof(uint);
                 return capacity * perSplat;
@@ -137,11 +135,18 @@ namespace GaussianSplatting
         public bool HasBuffers => streamer?.HasBuffers ?? false;
 
         /// <summary>
-        /// Returns true once when chunk data changed since last call.
-        /// Used by the render feature to force a re sort after chunk load/evict.
+        /// Returns true when chunk data changed since last call. Used by the render feature to force a re-sort after chunk load/evict.
         /// </summary>
         public bool ConsumeBufferDirtyFlag() => streamer?.ConsumeBufferDirtyFlag() ?? false;
 
+        /// <summary>
+        /// Flushes any pending GPU scatter commands to ensure that all loaded chunk data is visible to the render pipeline.
+        /// </summary>
+        public void FlushScatterCommandBuffer(UnityEngine.Rendering.ComputeCommandBuffer cmd)
+        {
+            streamer?.FlushScatterCommandBuffer(cmd);
+        }
+ 
         /// <summary>
         /// Indirection buffer mapping logical splat indices to physical pool positions.
         /// Bound to the sort compute shader as _SplatRemap.
@@ -153,7 +158,9 @@ namespace GaussianSplatting
         public ComputeBuffer RotationBuffer => streamer?.RotationBuffer;
         public ComputeBuffer ScaleBuffer => streamer?.ScaleBuffer;
         public ComputeBuffer SHBuffer => streamer?.SHBuffer;
-        public ComputeBuffer SHRestBuffer => streamer?.SHRestBuffer;
+        public ComputeBuffer SHRestBuffer0 => streamer?.SHRestBuffer0;
+        public ComputeBuffer SHRestBuffer1 => streamer?.SHRestBuffer1;
+        public ComputeBuffer SHRestBuffer2 => streamer?.SHRestBuffer2;
         public GSSortingResources SortingResources => sortingResources;
 
         void OnEnable()
@@ -176,8 +183,7 @@ namespace GaussianSplatting
 
         void OnApplicationQuit()
         {
-            // Belt-and-suspenders: ensure GPU resources are released even if
-            // OnDisable is skipped during an abrupt quit.
+            // Ensure streamer is disposed on application quit to stop background threads and release GPU resources.
             DisposeStreamer();
         }
 
@@ -192,28 +198,7 @@ namespace GaussianSplatting
             ChunkedGSManager.Register(this);
         }
 
-        void Update()
-        {
-            // In edit mode visibility is driven entirely by the render feature using
-            // the Scene camera, so we skip here to avoid competing with it.
-            if (!Application.isPlaying) return;
-
-            if (cachedCamera == null)
-            {
-                cachedCamera = Camera.main;
-            }
-
-            if (cachedCamera != null && streamer != null)
-            {
-                // Update visibility based on camera frustum
-                Matrix4x4 modelMatrix = transform.localToWorldMatrix;
-                streamer.UpdateVisibility(cachedCamera, modelMatrix);
-            }
-        }
-
-        /// <summary>
-        /// Initializes the chunk streamer with current settings.
-        /// </summary>
+        /// <summary> Initializes the chunk streamer with current settings. </summary>
         private void InitializeStreamer()
         {
             if (asset == null)
@@ -261,13 +246,6 @@ namespace GaussianSplatting
 
             Matrix4x4 modelMatrix = transform.localToWorldMatrix;
             streamer.UpdateVisibility(camera, modelMatrix);
-
-#if UNITY_EDITOR
-            // Force continuous scene view repaints while chunks are still loading, so ProcessCompletedReads()
-            //  gets called each frame rather than only when the user moves the mouse.
-            if (streamer.PendingReadCount > 0)
-                UnityEditor.SceneView.RepaintAll();
-#endif
         }
 
         /// <summary>
@@ -301,31 +279,6 @@ namespace GaussianSplatting
                 cmd.SetComputeBufferParam(shader, kernel, "_Rotations", streamer.RotationBuffer);
             if (streamer.ScaleBuffer != null)
                 cmd.SetComputeBufferParam(shader, kernel, "_Scales", streamer.ScaleBuffer);
-        }
-
-        /// <summary>
-        /// Binds buffers to a material for rendering.
-        /// </summary>
-        public void BindTo(Material material)
-        {
-            if (streamer == null) return;
-
-            if (streamer.PositionBuffer != null)
-                material.SetBuffer("_Positions", streamer.PositionBuffer);
-            if (streamer.RotationBuffer != null)
-                material.SetBuffer("_Rotations", streamer.RotationBuffer);
-            if (streamer.ScaleBuffer != null)
-                material.SetBuffer("_Scales", streamer.ScaleBuffer);
-            if (streamer.SHBuffer != null)
-                material.SetBuffer("_SH", streamer.SHBuffer);
-
-            if (ShBandsNumber > 1 && streamer.SHRestBuffer != null)
-            {
-                material.SetBuffer("_SHRest", streamer.SHRestBuffer);
-                material.SetInt("_SHRestCount", asset.SHRestCount);
-            }
-
-            material.SetInt("_SplatCount", ActiveSplatCount);
         }
 
         void OnDrawGizmosSelected()

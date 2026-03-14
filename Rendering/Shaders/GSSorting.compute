@@ -34,7 +34,7 @@
 #pragma use_dxc
 
 #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
-#include "../ThirdParty/DeviceRadixSort.hlsl"
+#include "../../ThirdParty/DeviceRadixSort.hlsl"
 #include "GSUtils.hlsl"
 
 // Input buffer (from GSComponent / ChunkedGSComponent pool)
@@ -94,8 +94,8 @@ float ComputeDepthSortKey(float viewZ)
 {
     // viewZ is negative for objects in front of camera (Unity convention)
     // More negative = farther away
-    // - Far object at viewZ = -100 → key = -100 (smaller)
-    // - Close object at viewZ = -3 → key = -3 (larger)
+    // - Far object at viewZ = -100 -> key = -100 (smaller)
+    // - Close object at viewZ = -3 -> key = -3 (larger)
     // Ascending sort: -100 < -3, so far objects come first
     return viewZ;
 }
